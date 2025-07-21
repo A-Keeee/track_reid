@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package tracking;
+
+message IsActivedRequest {
+}
+
+message IsActivedResponse {
+    bool is_active = 1;
+}
+
+message ActiveRequest {
+    bool active = 1;
+    int32 target_id = 2;    // 跟随的目标ID
+}
+
+message ActiveResponse {
+    int32 time = 1;         // 倒计时时间（秒）
+}
+
+// 坐标数据消息
+message CoordinateData {
+    float x = 1;        // X坐标 (米)
+    float y = 2;        // Y坐标 (米)
+    float z = 3;        // Z坐标 (米)
+    bool active = 4;    // 是否活跃
+    int32 target_id = 5; // 目标ID
+    double timestamp = 6; // 时间戳
+    float distance = 7;   // 距离 (米)
+    float yaw = 8;       // 偏航角 (弧度)
+    float pitch = 9;     // 俯仰角 (弧度)
+    float confidence = 10; // 置信度
+}
+
+// 空请求消息
+message Empty {
+}
+
+// 跟随指令消息
+message FollowCommand {
+    bool start_follow = 1;  // 是否开始跟随
+    int32 target_id = 2;    // 跟随的目标ID
+}
+
+// 跟踪状态消息
+message TrackingStatus {
+    bool is_active = 1;         // 是否正在活跃跟踪
+    double tracking_time = 2;   // 跟踪持续时间（秒）
+    int32 target_id = 3;        // 当前跟踪目标ID
+    double timestamp = 4;       // 状态时间戳
+    bool auto_follow_enabled = 5; // 是否启用自动跟踪
+    int32 auto_target_id = 6;   // 自动跟踪目标ID
+    bool is_manual_tracking = 7; // 是否为手动跟踪
+}
+
+// 响应消息
+message Response {
+    bool success = 1;
+    string message = 2;
+}
+
+// 自动跟踪配置消息
+message AutoTrackingConfig {
+    bool enabled = 1;           // 是否启用自动跟踪
+    float min_distance = 2;     // 最小跟踪距离 (米)
+    float max_distance = 3;     // 最大跟踪距离 (米)
+}
+
+// 跟踪服务定义
+service TrackingService {
+    // 发送坐标数据 (客户端流)
+    rpc SendCoordinates(stream CoordinateData) returns (Response);
+    
+    // 获取当前坐标 (单次请求)
+    rpc GetCurrentCoordinates(Empty) returns (CoordinateData);
+    
+    // 订阅坐标更新 (服务端流)
+    rpc SubscribeCoordinates(Empty) returns (stream CoordinateData);
+    
+    // 接收跟随指令
+    rpc SetFollowCommand(FollowCommand) returns (Response);
+    
+    // 获取跟踪状态
+    rpc GetTrackingStatus(Empty) returns (TrackingStatus);
+    
+    // 设置自动跟踪配置
+    rpc SetAutoTracking(AutoTrackingConfig) returns (Response);
+    
+    // 切换自动跟踪模式
+    rpc ToggleAutoTracking(Empty) returns (Response);
+
+    // 获取是否在跟随状态
+    rpc IsActived(IsActivedRequest) returns (IsActivedResponse);
+
+    //打开或关闭跟随
+    rpc Active(ActiveRequest) returns (ActiveResponse);
+}
