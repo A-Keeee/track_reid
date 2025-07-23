@@ -1,0 +1,8 @@
+=== gRPC客户端测试程序 ===
+🔗 模拟APP与跟踪系统的通信
+输入服务器地址 (默认 localhost:50051): Traceback (most recent call last):
+  File "grpc_client_test.py", line 241, in <module>
+    main()
+  File "grpc_client_test.py", line 173, in main
+    server_address = input("输入服务器地址 (默认 localhost:50051): ").strip() or "localhost:50051"
+EOFError: EOF when reading a line

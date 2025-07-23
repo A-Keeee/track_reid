@@ -1,8 +1,3 @@
-#REID+姿态+前10s无重复特征+gRPC通信
-# 
-# 性能优化版本 - 单目标跟踪系统
-# 
-
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -49,9 +44,7 @@ class ReIDFeatureExtractor:
             self.session = onnxruntime.InferenceSession(
                 model_path,
                 sess_options,
-                # providers=[("CUDAExecutionProvider", {"cudnn_conv_algo_search": "DEFAULT"}), 'CPUExecutionProvider']
-                providers=["CUDAExecutionProvider",]
-
+                providers=[("CUDAExecutionProvider", {"cudnn_conv_algo_search": "DEFAULT"}), 'CPUExecutionProvider']
             )
             self.input_name = self.session.get_inputs()[0].name
             input_shape = self.session.get_inputs()[0].shape
