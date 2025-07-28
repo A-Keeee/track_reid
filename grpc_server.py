@@ -44,10 +44,7 @@ class TrackingServiceImpl(tracking_pb2_grpc.TrackingServiceServicer):
                         pass
                 
                 # 打印接收到的坐标信息
-                if coordinate_data.active:
-                    print(f"📍 接收坐标: 目标{coordinate_data.target_id} "
-                          f"({coordinate_data.x:.2f}, {coordinate_data.y:.2f}, {coordinate_data.z:.2f}) "
-                          f"距离{coordinate_data.distance:.2f}m")
+                print(f"📍 接收坐标: ({coordinate_data.x:.2f}, {coordinate_data.y:.2f}, {coordinate_data.z:.2f})")
                     
             return tracking_pb2.Response(success=True, message="坐标数据接收完成")
             
@@ -58,27 +55,31 @@ class TrackingServiceImpl(tracking_pb2_grpc.TrackingServiceServicer):
 
 
     def Active(self, request, context):
-        """接收APP的跟随指令"""
+        """接收APP的开启跟随指令"""
         with self.status_lock:
-            self.follow_enabled = request.active
+            self.follow_enabled = True
             self.target_id = request.target_id if request.target_id > 0 else None
             
-            if self.follow_enabled:
-                if self.tracking_start_time is None:
-                    self.tracking_start_time = time.time()
-                    print(f"🎯 收到跟随指令: 开始跟随目标 ID {self.target_id}")
-                    # 返回10秒倒计时，给用户准备时间
-                    countdown_time = 10
-                else:
-                    # 已经在跟随状态，返回当前跟踪时间
-                    countdown_time = 0
-                    print(f"🔄 更新跟随目标 ID: {self.target_id}")
+            if self.tracking_start_time is None:
+                self.tracking_start_time = time.time()
+                print(f"🎯 收到开启跟随指令: 开始跟随目标 ID {self.target_id}")
+                # 返回10秒倒计时，给用户准备时间
+                countdown_time = 10
             else:
-                self.tracking_start_time = None
-                print("⏹️ 收到跟随指令: 停止跟随")
+                # 已经在跟随状态，更新目标ID
                 countdown_time = 0
+                print(f"🔄 更新跟随目标 ID: {self.target_id}")
                 
         return tracking_pb2.ActiveResponse(time=countdown_time)
+
+    def Disactive(self, request, context):
+        """接收APP的关闭跟随指令"""
+        with self.status_lock:
+            self.follow_enabled = False
+            self.tracking_start_time = None
+            print("⏹️ 收到关闭跟随指令: 停止跟随")
+                
+        return tracking_pb2.Empty()
 
 
 
@@ -120,10 +121,7 @@ class TrackingServiceImpl(tracking_pb2_grpc.TrackingServiceServicer):
             return self.current_coordinate
         else:
             return tracking_pb2.CoordinateData(
-                x=0.0, y=0.0, z=0.0,
-                active=False,
-                target_id=0,
-                timestamp=time.time()
+                x=0.0, y=0.0, z=0.0
             )
     
     def SubscribeCoordinates(self, request, context):
@@ -138,10 +136,7 @@ class TrackingServiceImpl(tracking_pb2_grpc.TrackingServiceServicer):
                 except queue.Empty:
                     # 发送心跳数据
                     yield tracking_pb2.CoordinateData(
-                        x=0.0, y=0.0, z=0.0,
-                        active=False,
-                        target_id=0,
-                        timestamp=time.time()
+                        x=0.0, y=0.0, z=0.0
                     )
         except Exception as e:
             print(f"坐标流订阅错误: {e}")
@@ -182,6 +177,24 @@ class TrackingServiceImpl(tracking_pb2_grpc.TrackingServiceServicer):
             return tracking_pb2.IsActivedResponse(
                 is_active=self.follow_enabled
             )
+    
+    def SetAutoTracking(self, request, context):
+        """设置自动跟踪配置"""
+        # 这里可以根据需要实现自动跟踪逻辑
+        # 目前暂时返回成功响应
+        return tracking_pb2.Response(
+            success=True,
+            message=f"自动跟踪配置已更新: {'启用' if request.enabled else '禁用'}"
+        )
+    
+    def ToggleAutoTracking(self, request, context):
+        """切换自动跟踪模式"""
+        # 这里可以根据需要实现自动跟踪切换逻辑
+        # 目前暂时返回成功响应
+        return tracking_pb2.Response(
+            success=True,
+            message="自动跟踪模式已切换"
+        )
 
 
 
@@ -230,14 +243,7 @@ class GRPCServer:
             coordinate_data = tracking_pb2.CoordinateData(
                 x=target_state.world_position[0] if target_state.world_position else 0.0,
                 y=target_state.world_position[1] if target_state.world_position else 0.0,
-                z=target_state.world_position[2] if target_state.world_position else 0.0,
-                active=target_state.active,
-                target_id=target_state.target_id,
-                timestamp=time.time(),
-                distance=target_state.distance,
-                yaw=target_state.yaw,
-                pitch=target_state.pitch,
-                confidence=target_state.lock_strength
+                z=target_state.world_position[2] if target_state.world_position else 0.0
             )
             self.service_impl.update_coordinate(coordinate_data)
     

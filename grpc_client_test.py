@@ -63,22 +63,31 @@ class TrackingClient:
             print(f"❌ 发送跟随指令失败: {e}")
             return False
 
-    def send_active_command(self, active=True, target_id=1):
-        """发送 Active 指令（新版本）"""
+    def send_active_command(self, target_id=1):
+        """发送 Active 指令（开启跟随）"""
         try:
             request = tracking_pb2.ActiveRequest(
-                active=active,
                 target_id=target_id
             )
             response = self.stub.Active(request)
-            action = "开始跟随" if active else "停止跟随"
-            if active and response.time > 0:
-                print(f"📡 {action}指令发送成功! 倒计时: {response.time}秒")
+            if response.time > 0:
+                print(f"📡 开始跟随指令发送成功! 倒计时: {response.time}秒")
             else:
-                print(f"📡 {action}指令发送成功! 响应时间: {response.time}秒")
+                print(f"📡 开始跟随指令发送成功! 响应时间: {response.time}秒")
             return True
         except Exception as e:
             print(f"❌ 发送 Active 指令失败: {e}")
+            return False
+    
+    def send_disactive_command(self):
+        """发送 Disactive 指令（停止跟随）"""
+        try:
+            request = tracking_pb2.Empty()
+            response = self.stub.Disactive(request)
+            print(f"📡 停止跟随指令发送成功!")
+            return True
+        except Exception as e:
+            print(f"❌ 发送 Disactive 指令失败: {e}")
             return False
     
     def get_tracking_status(self):
@@ -101,16 +110,8 @@ class TrackingClient:
         try:
             request = tracking_pb2.Empty()
             response = self.stub.GetCurrentCoordinates(request)
-            if response.active:
-                print(f"📍 当前目标坐标:")
-                print(f"   位置: X={response.x:.2f}m, Y={response.y:.2f}m, Z={response.z:.2f}m")
-                print(f"   距离: {response.distance:.2f}m")
-                print(f"   偏航角: {response.yaw:.2f}弧度 ({response.yaw*180/math.pi:.1f}°)")
-                print(f"   俯仰角: {response.pitch:.2f}弧度 ({response.pitch*180/math.pi:.1f}°)")
-                print(f"   目标ID: {response.target_id}")
-                print(f"   置信度: {response.confidence:.2f}")
-            else:
-                print("🔍 当前无活跃目标")
+            print(f"📍 当前坐标:")
+            print(f"   位置: X={response.x:.2f}m, Y={response.y:.2f}m, Z={response.z:.2f}m")
             return response
         except Exception as e:
             print(f"❌ 获取坐标失败: {e}")
@@ -133,13 +134,8 @@ class TrackingClient:
                     count += 1
                     current_time = time.strftime('%H:%M:%S', time.localtime())
                     
-                    if response.active:
-                        print(f"[{current_time}] 📍 目标{response.target_id}: "
-                              f"({response.x:.2f}, {response.y:.2f}, {response.z:.2f}), "
-                              f"距离{response.distance:.2f}m, 置信度{response.confidence:.2f}")
-                    else:
-                        if count % 10 == 0:  # 每10次心跳显示一次
-                            print(f"[{current_time}] 💓 心跳信号 - 无活跃目标")
+                    print(f"[{current_time}] 📍 坐标: "
+                          f"({response.x:.2f}, {response.y:.2f}, {response.z:.2f})")
                         
                 print(f"📡 坐标流订阅结束，共接收 {count} 条消息")
                 
@@ -202,14 +198,14 @@ def main():
                 
             if choice == '1':
                 # target_id = int(input("输入目标ID (默认1): ") or "1")
-                client.send_active_command(active=True, target_id=1)
+                client.send_active_command(target_id=1)
             
             elif choice == '2':
                 target_id = int(input("输入目标ID (默认1): ") or "1")
-                client.send_active_command(active=True, target_id=target_id)
+                client.send_active_command(target_id=target_id)
 
             elif choice == '3':
-                client.send_active_command(active=False, target_id=0)
+                client.send_disactive_command()
 
             elif choice == '4':
                 client.check_is_actived()

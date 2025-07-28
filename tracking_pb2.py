@@ -14,7 +14,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0etracking.proto\x12\x08tracking\"\x12\n\x10IsActivedRequest\"&\n\x11IsActivedResponse\x12\x11\n\tis_active\x18\x01 \x01(\x08\"2\n\rActiveRequest\x12\x0e\n\x06\x61\x63tive\x18\x01 \x01(\x08\x12\x11\n\ttarget_id\x18\x02 \x01(\x05\"\x1e\n\x0e\x41\x63tiveResponse\x12\x0c\n\x04time\x18\x01 \x01(\x05\"\xa9\x01\n\x0e\x43oordinateData\x12\t\n\x01x\x18\x01 \x01(\x02\x12\t\n\x01y\x18\x02 \x01(\x02\x12\t\n\x01z\x18\x03 \x01(\x02\x12\x0e\n\x06\x61\x63tive\x18\x04 \x01(\x08\x12\x11\n\ttarget_id\x18\x05 \x01(\x05\x12\x11\n\ttimestamp\x18\x06 \x01(\x01\x12\x10\n\x08\x64istance\x18\x07 \x01(\x02\x12\x0b\n\x03yaw\x18\x08 \x01(\x02\x12\r\n\x05pitch\x18\t \x01(\x02\x12\x12\n\nconfidence\x18\n \x01(\x02\"\x07\n\x05\x45mpty\"8\n\rFollowCommand\x12\x14\n\x0cstart_follow\x18\x01 \x01(\x08\x12\x11\n\ttarget_id\x18\x02 \x01(\x05\"\xb1\x01\n\x0eTrackingStatus\x12\x11\n\tis_active\x18\x01 \x01(\x08\x12\x15\n\rtracking_time\x18\x02 \x01(\x01\x12\x11\n\ttarget_id\x18\x03 \x01(\x05\x12\x11\n\ttimestamp\x18\x04 \x01(\x01\x12\x1b\n\x13\x61uto_follow_enabled\x18\x05 \x01(\x08\x12\x16\n\x0e\x61uto_target_id\x18\x06 \x01(\x05\x12\x1a\n\x12is_manual_tracking\x18\x07 \x01(\x08\",\n\x08Response\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"Q\n\x12\x41utoTrackingConfig\x12\x0f\n\x07\x65nabled\x18\x01 \x01(\x08\x12\x14\n\x0cmin_distance\x18\x02 \x01(\x02\x12\x14\n\x0cmax_distance\x18\x03 \x01(\x02\x32\xe1\x04\n\x0fTrackingService\x12\x41\n\x0fSendCoordinates\x12\x18.tracking.CoordinateData\x1a\x12.tracking.Response(\x01\x12\x42\n\x15GetCurrentCoordinates\x12\x0f.tracking.Empty\x1a\x18.tracking.CoordinateData\x12\x43\n\x14SubscribeCoordinates\x12\x0f.tracking.Empty\x1a\x18.tracking.CoordinateData0\x01\x12?\n\x10SetFollowCommand\x12\x17.tracking.FollowCommand\x1a\x12.tracking.Response\x12>\n\x11GetTrackingStatus\x12\x0f.tracking.Empty\x1a\x18.tracking.TrackingStatus\x12\x43\n\x0fSetAutoTracking\x12\x1c.tracking.AutoTrackingConfig\x1a\x12.tracking.Response\x12\x39\n\x12ToggleAutoTracking\x12\x0f.tracking.Empty\x1a\x12.tracking.Response\x12\x44\n\tIsActived\x12\x1a.tracking.IsActivedRequest\x1a\x1b.tracking.IsActivedResponse\x12;\n\x06\x41\x63tive\x12\x17.tracking.ActiveRequest\x1a\x18.tracking.ActiveResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0etracking.proto\x12\x08tracking\"\x12\n\x10IsActivedRequest\"&\n\x11IsActivedResponse\x12\x11\n\tis_active\x18\x01 \x01(\x08\"\"\n\rActiveRequest\x12\x11\n\ttarget_id\x18\x01 \x01(\x05\"\x1e\n\x0e\x41\x63tiveResponse\x12\x0c\n\x04time\x18\x01 \x01(\x05\"1\n\x0e\x43oordinateData\x12\t\n\x01x\x18\x01 \x01(\x02\x12\t\n\x01y\x18\x02 \x01(\x02\x12\t\n\x01z\x18\x03 \x01(\x02\"\x07\n\x05\x45mpty\"8\n\rFollowCommand\x12\x14\n\x0cstart_follow\x18\x01 \x01(\x08\x12\x11\n\ttarget_id\x18\x02 \x01(\x05\"\xb1\x01\n\x0eTrackingStatus\x12\x11\n\tis_active\x18\x01 \x01(\x08\x12\x15\n\rtracking_time\x18\x02 \x01(\x01\x12\x11\n\ttarget_id\x18\x03 \x01(\x05\x12\x11\n\ttimestamp\x18\x04 \x01(\x01\x12\x1b\n\x13\x61uto_follow_enabled\x18\x05 \x01(\x08\x12\x16\n\x0e\x61uto_target_id\x18\x06 \x01(\x05\x12\x1a\n\x12is_manual_tracking\x18\x07 \x01(\x08\",\n\x08Response\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"Q\n\x12\x41utoTrackingConfig\x12\x0f\n\x07\x65nabled\x18\x01 \x01(\x08\x12\x14\n\x0cmin_distance\x18\x02 \x01(\x02\x12\x14\n\x0cmax_distance\x18\x03 \x01(\x02\x32\x90\x05\n\x0fTrackingService\x12\x41\n\x0fSendCoordinates\x12\x18.tracking.CoordinateData\x1a\x12.tracking.Response(\x01\x12\x42\n\x15GetCurrentCoordinates\x12\x0f.tracking.Empty\x1a\x18.tracking.CoordinateData\x12\x43\n\x14SubscribeCoordinates\x12\x0f.tracking.Empty\x1a\x18.tracking.CoordinateData0\x01\x12?\n\x10SetFollowCommand\x12\x17.tracking.FollowCommand\x1a\x12.tracking.Response\x12>\n\x11GetTrackingStatus\x12\x0f.tracking.Empty\x1a\x18.tracking.TrackingStatus\x12\x43\n\x0fSetAutoTracking\x12\x1c.tracking.AutoTrackingConfig\x1a\x12.tracking.Response\x12\x39\n\x12ToggleAutoTracking\x12\x0f.tracking.Empty\x1a\x12.tracking.Response\x12\x44\n\tIsActived\x12\x1a.tracking.IsActivedRequest\x1a\x1b.tracking.IsActivedResponse\x12;\n\x06\x41\x63tive\x12\x17.tracking.ActiveRequest\x1a\x18.tracking.ActiveResponse\x12-\n\tDisactive\x12\x0f.tracking.Empty\x1a\x0f.tracking.Emptyb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -26,21 +26,21 @@ if _descriptor._USE_C_DESCRIPTORS == False:
   _globals['_ISACTIVEDRESPONSE']._serialized_start=48
   _globals['_ISACTIVEDRESPONSE']._serialized_end=86
   _globals['_ACTIVEREQUEST']._serialized_start=88
-  _globals['_ACTIVEREQUEST']._serialized_end=138
-  _globals['_ACTIVERESPONSE']._serialized_start=140
-  _globals['_ACTIVERESPONSE']._serialized_end=170
-  _globals['_COORDINATEDATA']._serialized_start=173
-  _globals['_COORDINATEDATA']._serialized_end=342
-  _globals['_EMPTY']._serialized_start=344
-  _globals['_EMPTY']._serialized_end=351
-  _globals['_FOLLOWCOMMAND']._serialized_start=353
-  _globals['_FOLLOWCOMMAND']._serialized_end=409
-  _globals['_TRACKINGSTATUS']._serialized_start=412
-  _globals['_TRACKINGSTATUS']._serialized_end=589
-  _globals['_RESPONSE']._serialized_start=591
-  _globals['_RESPONSE']._serialized_end=635
-  _globals['_AUTOTRACKINGCONFIG']._serialized_start=637
-  _globals['_AUTOTRACKINGCONFIG']._serialized_end=718
-  _globals['_TRACKINGSERVICE']._serialized_start=721
-  _globals['_TRACKINGSERVICE']._serialized_end=1330
+  _globals['_ACTIVEREQUEST']._serialized_end=122
+  _globals['_ACTIVERESPONSE']._serialized_start=124
+  _globals['_ACTIVERESPONSE']._serialized_end=154
+  _globals['_COORDINATEDATA']._serialized_start=156
+  _globals['_COORDINATEDATA']._serialized_end=205
+  _globals['_EMPTY']._serialized_start=207
+  _globals['_EMPTY']._serialized_end=214
+  _globals['_FOLLOWCOMMAND']._serialized_start=216
+  _globals['_FOLLOWCOMMAND']._serialized_end=272
+  _globals['_TRACKINGSTATUS']._serialized_start=275
+  _globals['_TRACKINGSTATUS']._serialized_end=452
+  _globals['_RESPONSE']._serialized_start=454
+  _globals['_RESPONSE']._serialized_end=498
+  _globals['_AUTOTRACKINGCONFIG']._serialized_start=500
+  _globals['_AUTOTRACKINGCONFIG']._serialized_end=581
+  _globals['_TRACKINGSERVICE']._serialized_start=584
+  _globals['_TRACKINGSERVICE']._serialized_end=1240
 # @@protoc_insertion_point(module_scope)

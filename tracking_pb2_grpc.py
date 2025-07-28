@@ -60,6 +60,11 @@ class TrackingServiceStub(object):
                 request_serializer=tracking__pb2.ActiveRequest.SerializeToString,
                 response_deserializer=tracking__pb2.ActiveResponse.FromString,
                 )
+        self.Disactive = channel.unary_unary(
+                '/tracking.TrackingService/Disactive',
+                request_serializer=tracking__pb2.Empty.SerializeToString,
+                response_deserializer=tracking__pb2.Empty.FromString,
+                )
 
 
 class TrackingServiceServicer(object):
@@ -123,7 +128,14 @@ class TrackingServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def Active(self, request, context):
-        """打开或关闭跟随
+        """打开跟随
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Disactive(self, request, context):
+        """关闭跟随
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -176,6 +188,11 @@ def add_TrackingServiceServicer_to_server(servicer, server):
                     servicer.Active,
                     request_deserializer=tracking__pb2.ActiveRequest.FromString,
                     response_serializer=tracking__pb2.ActiveResponse.SerializeToString,
+            ),
+            'Disactive': grpc.unary_unary_rpc_method_handler(
+                    servicer.Disactive,
+                    request_deserializer=tracking__pb2.Empty.FromString,
+                    response_serializer=tracking__pb2.Empty.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -338,5 +355,22 @@ class TrackingService(object):
         return grpc.experimental.unary_unary(request, target, '/tracking.TrackingService/Active',
             tracking__pb2.ActiveRequest.SerializeToString,
             tracking__pb2.ActiveResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def Disactive(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/tracking.TrackingService/Disactive',
+            tracking__pb2.Empty.SerializeToString,
+            tracking__pb2.Empty.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

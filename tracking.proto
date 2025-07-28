@@ -10,8 +10,7 @@ message IsActivedResponse {
 }
 
 message ActiveRequest {
-    bool active = 1;
-    int32 target_id = 2;    // 跟随的目标ID
+    int32 target_id = 1;    // 跟随的目标ID
 }
 
 message ActiveResponse {
@@ -23,13 +22,6 @@ message CoordinateData {
     float x = 1;        // X坐标 (米)
     float y = 2;        // Y坐标 (米)
     float z = 3;        // Z坐标 (米)
-    bool active = 4;    // 是否活跃
-    int32 target_id = 5; // 目标ID
-    double timestamp = 6; // 时间戳
-    float distance = 7;   // 距离 (米)
-    float yaw = 8;       // 偏航角 (弧度)
-    float pitch = 9;     // 俯仰角 (弧度)
-    float confidence = 10; // 置信度
 }
 
 // 空请求消息
@@ -92,6 +84,9 @@ service TrackingService {
     // 获取是否在跟随状态
     rpc IsActived(IsActivedRequest) returns (IsActivedResponse);
 
-    //打开或关闭跟随
+    //打开跟随
     rpc Active(ActiveRequest) returns (ActiveResponse);
+
+    //关闭跟随
+    rpc Disactive(Empty) returns (Empty);
 }
