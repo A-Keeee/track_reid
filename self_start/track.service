@@ -1,0 +1,15 @@
+
+[Unit]
+Description=track service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+User=juwei
+Group=juwei
+ExecStart=/home/juwei/self_start/start.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
