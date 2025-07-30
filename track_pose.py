@@ -2,8 +2,6 @@
 # 
 # 性能优化版本 - 单目标跟踪系统
 # 
-# [修改] ReID模型已替换为基于 fast-reid 库的实现
-
 import cv2
 import numpy as np
 from ultralytics import YOLO

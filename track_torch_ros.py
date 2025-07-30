@@ -386,7 +386,7 @@ class ProcessingThread(threading.Thread):
             if self.grpc_client and (time.time() - self.last_grpc_check_time > 1.0):
                 self.last_grpc_check_time = time.time()
                 is_active, _ = self.grpc_client.get_command_state()
-                if not is_active and self.grpc_client.connected:
+                if not is_active and self.grpc_client.connected and not self.ros_command_active:
                     print("收到gRPC停止指令，返回待机状态。")
                     self.transition_to_idle()
                     return
