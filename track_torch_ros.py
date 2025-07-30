@@ -381,11 +381,14 @@ class ProcessingThread(threading.Thread):
             self.process_capturing(frame)
 
         elif self.state == 'TRACKING':
+
+            print(self.grpc_client.connected)
             self.process_tracking(frame)
             # 检查gRPC停止信号 (保持原有逻辑不变)
             if self.grpc_client and (time.time() - self.last_grpc_check_time > 1.0):
                 self.last_grpc_check_time = time.time()
                 is_active, _ = self.grpc_client.get_command_state()
+                print(is_active)
                 if not is_active and self.grpc_client.connected and not self.ros_command_active:
                     print("收到gRPC停止指令，返回待机状态。")
                     self.transition_to_idle()
