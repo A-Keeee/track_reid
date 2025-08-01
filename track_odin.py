@@ -1,7 +1,12 @@
-# 文件名: track_reid_grpc_auto_viz.py
-# 描述: 自动选择中心目标，由gRPC指令或键盘'R'键触发，进行10秒特征捕获后开始跟踪。
-# 版本: v4.2 - 优化了可视化逻辑，确保跟踪框稳定显示。
-
+# 文件名: track_torch_ros.py
+# 描述: 通过订阅ROS2话题获取图像，自动选择中心目标进行跟踪。
+# 版本: v5.0 - ROS2集成版
+#
+# 运行依赖:
+# - rclpy
+# - cv_bridge
+# - sensor_msgs
+# - message_filters
 
 # ros2 topic pub /start_vision std_msgs/msg/Int32 "{data: 1}"
 import cv2
@@ -9,7 +14,6 @@ import numpy as np
 from ultralytics import YOLO
 import time
 import math
-import depthai as dai
 import sys
 import os
 import threading
@@ -21,6 +25,15 @@ import torch.nn.functional as F
 from pathlib import Path
 from PIL import Image
 import json
+
+# ==============================================================================
+# ROS2 相关导入
+# ==============================================================================
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image as RosImage
+from cv_bridge import CvBridge, CvBridgeError
+import message_filters
 
 # 导入生成的gRPC模块
 try:
@@ -169,40 +182,8 @@ class TrackingGRPCClient:
 
 
 # ==============================================================================
-# OAK相机与ReID核心逻辑
+# 核心逻辑
 # ==============================================================================
-def create_camera_pipeline():
-    pipeline = dai.Pipeline()
-    cam_rgb = pipeline.create(dai.node.ColorCamera)
-    mono_left = pipeline.create(dai.node.MonoCamera)
-    mono_right = pipeline.create(dai.node.MonoCamera)
-    stereo = pipeline.create(dai.node.StereoDepth)
-    xout_rgb = pipeline.create(dai.node.XLinkOut)
-    xout_depth = pipeline.create(dai.node.XLinkOut)
-    xout_rgb.setStreamName("rgb")
-    xout_depth.setStreamName("depth")
-    cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
-    cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-    cam_rgb.setPreviewSize(640, 480)
-    cam_rgb.setInterleaved(False)
-    cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-    cam_rgb.setFps(30)
-    mono_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-    mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
-    mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-    mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
-    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
-    stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
-    stereo.setOutputSize(mono_left.getResolutionWidth(), mono_left.getResolutionHeight())
-    stereo.setLeftRightCheck(True)
-    stereo.setExtendedDisparity(False)
-    stereo.setSubpixel(False)
-    mono_left.out.link(stereo.left)
-    mono_right.out.link(stereo.right)
-    cam_rgb.preview.link(xout_rgb.input)
-    stereo.depth.link(xout_depth.input)
-    return pipeline
-
 def calculate_3d_coordinates(depth_map, center_point, size=None):
     u, v = int(center_point[0]), int(center_point[1])
     height, width = depth_map.shape
@@ -211,22 +192,36 @@ def calculate_3d_coordinates(depth_map, center_point, size=None):
     x1, y1 = max(0, u - roi_size), max(0, v - roi_size)
     x2, y2 = min(width - 1, u + roi_size), min(height - 1, v + roi_size)
     if x1 >= x2 or y1 >= y2: return (0, 0, 0)
+    
     depth_roi = depth_map[int(y1):int(y2), int(x1):int(x2)]
-    valid_mask = (depth_roi > 300) & (depth_roi < 8000)
+    
+    # 深度值单位已经是米 (32FC1)，所以不需要除以1000
+    # 过滤掉无效的深度值 (0 或 NaN)
+    valid_mask = (depth_roi > 0.3) & (depth_roi < 15.0) & ~np.isnan(depth_roi)
+    
     if not np.any(valid_mask): return (0, 0, 0)
+    
     median_depth = np.median(depth_roi[valid_mask])
-    Z_cam = median_depth / 1000.0
+    Z_cam = median_depth
+    
     if Z_cam <= 0.3 or Z_cam > 15.0: return (0, 0, 0)
-    fx, fy = 860.0, 860.0
-    cx, cy = width / 2.0, height / 2.0
+    
+    # 使用Odin相机的内参
+    fx, fy = 734.357, 734.629
+    cx, cy = 816.469, 642.979
+    
     try:
         X_cam = (u - cx) * Z_cam / fx
         Y_cam = (v - cy) * Z_cam / fy
+        # 坐标系转换：(相机坐标系 -> 世界/机器人坐标系)
+        # X_world -> 前方, Y_world -> 左方, Z_world -> 上方
         X_world = Z_cam
         Y_world = -X_cam
         Z_world = -Y_cam
     except ZeroDivisionError: return (0, 0, 0)
+    
     if any(math.isnan(val) for val in (X_world, Y_world, Z_world)): return (0, 0, 0)
+    
     return (X_world, Y_world, Z_world)
 
 def detect_all_persons(frame, model, conf_thres=0.5):
@@ -259,53 +254,6 @@ def find_center_person(frame, yolo_model):
 # ==============================================================================
 # 多线程框架
 # ==============================================================================
-class CameraManager:
-    def __init__(self, max_retries=3, retry_delay=3):
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-        self.device = None
-        self.pipeline = create_camera_pipeline()
-    def connect_camera(self):
-        for attempt in range(self.max_retries):
-            try:
-                print(f"尝试连接OAK相机... (第 {attempt + 1}/{self.max_retries} 次)")
-                self.device = dai.Device(self.pipeline)
-                print("OAK相机连接成功！")
-                return True
-            except Exception as e:
-                print(f"相机连接失败: {e}")
-                if self.device: self.device.close()
-                self.device = None
-                if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay)
-        return False
-    def get_device(self): return self.device
-    def close(self):
-        if self.device: self.device.close()
-
-class FrameCaptureThread(threading.Thread):
-    def __init__(self, device, frame_queue):
-        super().__init__()
-        self.device = device
-        self.frame_queue = frame_queue
-        self.running = True
-        self.q_rgb = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
-        self.q_depth = device.getOutputQueue(name="depth", maxSize=4, blocking=False)
-    def run(self):
-        while self.running:
-            try:
-                in_rgb = self.q_rgb.get()
-                in_depth = self.q_depth.get()
-                if self.frame_queue.full():
-                    self.frame_queue.get_nowait()
-                self.frame_queue.put((in_rgb.getCvFrame(), in_depth.getFrame()))
-            except Exception as e:
-                if self.running: print(f"相机线程错误: {e}")
-                self.running = False
-        print("相机线程已停止。")
-    def stop(self):
-        self.running = False
-
 class ProcessingThread(threading.Thread):
     def __init__(self, frame_queue, result_queue, stop_event, start_event, grpc_client, args, yolo_model, reid_model):
         super().__init__()
@@ -353,16 +301,13 @@ class ProcessingThread(threading.Thread):
 
         while not self.stop_event.is_set():
             try:
-                frame, depth_frame_raw = self.frame_queue.get(timeout=1)
-                self.current_depth_frame = cv2.medianBlur(depth_frame_raw.astype(np.float32), 5).astype(np.uint16)
+                frame, depth_frame = self.frame_queue.get(timeout=1)
+                self.current_depth_frame = depth_frame
             except queue.Empty:
                 continue
             
             # 1. 执行核心状态逻辑
             self.handle_state(frame)
-            # print("self.last_ros_command_active:111", self.last_ros_command_active)
-
-
 
             # 2. 如果启用，创建并发送可视化帧
             if self.enable_visualization:
@@ -378,7 +323,7 @@ class ProcessingThread(threading.Thread):
         start_signal = self.check_start_signal()
 
         if self.state == 'IDLE':
-            self.status_message = "状态: 待机 (按R或等待gRPC指令)"
+            self.status_message = "状态: 待机 (按R或等待gRPC/ROS2指令)"
             if start_signal:
                 self.transition_to_capturing(frame)
         
@@ -391,11 +336,6 @@ class ProcessingThread(threading.Thread):
                 self.last_grpc_check_time = time.time()
                 is_active, _ = self.grpc_client.get_command_state()
                 if not is_active and self.grpc_client.connected and not self.last_ros_command_active:
-
-                    # print("is_active:", is_active)
-                    # print("self.grpc_client.connected:", self.grpc_client.connected)
-                    # print("self.last_ros_command_active:", self.last_ros_command_active)
-
                     print("收到gRPC停止指令，返回待机状态。")
                     self.transition_to_idle()
                     return
@@ -429,13 +369,6 @@ class ProcessingThread(threading.Thread):
             with open(self.ros_control_file, 'r') as f:
                 data = json.load(f)
                 command = data.get('command', 0)
-                timestamp = data.get('timestamp', 0)
-                
-                # # 检查命令是否太旧（超过5秒）
-                # if time.time() - timestamp > 5.0:
-                #     self.ros_command_active = False
-                #     self.last_ros_command_active = False
-                #     return False
                 
                 new_active = (command == 1)
                 
@@ -447,8 +380,6 @@ class ProcessingThread(threading.Thread):
                         print("收到ROS2关闭跟随指令...")
                 
                 self.last_ros_command_active = new_active
-                # print(f"当前ROS2跟随状态: {new_active}")
-                # print(f"self.last_ros_command_active: {self.last_ros_command_active}")
                 self.ros_command_active = new_active
                 return self.ros_command_active
                 
@@ -475,9 +406,7 @@ class ProcessingThread(threading.Thread):
                 return True
                 
         # 3. 检查ROS2控制信号 (新增，不影响gRPC)
-        # 先保存当前的ROS状态
         prev_ros_active = self.last_ros_command_active
-        # 读取最新的ROS2状态
         current_ros_active = self.check_ros_control_signal()
         
         # 只有在从非激活状态变为激活状态时才触发开始信号
@@ -498,7 +427,7 @@ class ProcessingThread(threading.Thread):
         self.capture_start_time = time.time()
         self.last_capture_time = time.time() - 1.9
         self.status_message = "collecting... (0/5)"
-        print(f"目标锁定：{initial_bbox}。开始10秒特征捕获...")
+        print(f"目标锁定：{initial_bbox}。开始特征捕获...")
 
     def process_capturing(self, frame):
         time_elapsed = time.time() - self.capture_start_time
@@ -622,79 +551,124 @@ class ProcessingThread(threading.Thread):
         distmat.addmm_(self.query_feats, gallery_feats.t(), beta=1, alpha=-2)
         return distmat.cpu().numpy()
 
+# ==============================================================================
+# ROS2 节点和主程序
+# ==============================================================================
+class ImageSubscriberNode(Node):
+    def __init__(self, args):
+        super().__init__('reid_tracker_node')
+        self.get_logger().info("=== ReID ROS2 跟踪节点启动 ===")
+        
+        self.bridge = CvBridge()
+        self.frame_queue = queue.Queue(maxsize=5)
+        self.result_queue = queue.Queue(maxsize=5) if not args.no_viz else None
+        self.stop_event = threading.Event()
+        self.start_event = threading.Event()
+        
+        # 加载模型
+        self.get_logger().info("正在加载模型...")
+        try:
+            self.yolo_model = YOLO(args.model_path)
+            self.reid_model = build_model(reidCfg, num_classes=1501)
+            self.reid_model.load_param(reidCfg.TEST.WEIGHT)
+            self.reid_model.eval()
+            self.get_logger().info("✓ 模型加载完成")
+        except Exception as e:
+            self.get_logger().error(f"❌ 模型加载失败: {e}")
+            raise e
 
-# ==============================================================================
-# 主程序
-# ==============================================================================
+        # 初始化gRPC客户端
+        self.grpc_client = TrackingGRPCClient(args.grpc_server) if not args.no_grpc else None
+        
+        # 启动处理线程
+        self.processing_thread = ProcessingThread(
+            self.frame_queue, self.result_queue, self.stop_event, 
+            self.start_event, self.grpc_client, args, 
+            self.yolo_model, self.reid_model
+        )
+        self.processing_thread.start()
+        self.get_logger().info("✓ 后台处理线程已启动...")
+
+        # 设置订阅器
+        self.color_sub = message_filters.Subscriber(self, RosImage, '/odin1/image_undistorted')
+        self.depth_sub = message_filters.Subscriber(self, RosImage, '/odin1/depth/image_raw')
+
+        # 时间同步器
+        self.time_synchronizer = message_filters.ApproximateTimeSynchronizer(
+            [self.color_sub, self.depth_sub],
+            queue_size=10,
+            slop=0.1  # 允许0.1秒的时间戳差异
+        )
+        self.time_synchronizer.registerCallback(self.image_callback)
+        self.get_logger().info("✓ 已订阅彩色和深度图像话题，等待同步消息...")
+
+    def image_callback(self, color_msg, depth_msg):
+        try:
+            # 将ROS图像消息转换为OpenCV格式
+            color_frame = self.bridge.imgmsg_to_cv2(color_msg, "bgr8")
+            # 深度图是32FC1格式，直接转换
+            depth_frame = self.bridge.imgmsg_to_cv2(depth_msg, "32FC1")
+        except CvBridgeError as e:
+            self.get_logger().error(f"CvBridge转换错误: {e}")
+            return
+        
+        # 将帧放入队列供处理线程使用
+        if self.frame_queue.full():
+            self.frame_queue.get_nowait() # 如果队列满了，丢弃旧的帧
+        self.frame_queue.put((color_frame, depth_frame))
+
+    def stop_all_threads(self):
+        self.get_logger().info("正在停止所有线程...")
+        self.stop_event.set()
+        self.processing_thread.join(timeout=5)
+        if self.processing_thread.is_alive():
+            self.get_logger().warn("处理线程未能正常停止。")
+
 def main(args):
-    print("=== OAK ReID 自动指令跟踪系统 ===")
+    rclpy.init(args=None)
     
-    camera_manager = CameraManager()
-    if not camera_manager.connect_camera(): return
-    
-    device = torch.device(args.device)
     try:
-        print("正在加载模型...")
-        yolo_model = YOLO(args.model_path)
-        reid_model = build_model(reidCfg, num_classes=1501)
-        reid_model.load_param(reidCfg.TEST.WEIGHT)
-        reid_model.eval()
-        print("✓ 模型加载完成")
+        reid_node = ImageSubscriberNode(args)
     except Exception as e:
-        print(f"❌ 模型加载失败: {e}")
-        camera_manager.close()
+        print(f"节点初始化失败: {e}")
+        rclpy.shutdown()
         return
 
-    frame_queue = queue.Queue(maxsize=2)
-    result_queue = queue.Queue(maxsize=2) if not args.no_viz else None
-    stop_event = threading.Event()
-    start_event = threading.Event()
-    
-    grpc_client = TrackingGRPCClient(args.grpc_server) if not args.no_grpc else None
-
-    capture_thread = FrameCaptureThread(camera_manager.get_device(), frame_queue)
-    processing_thread = ProcessingThread(frame_queue, result_queue, stop_event, start_event, grpc_client, args, yolo_model, reid_model)
-
-    capture_thread.start()
-    processing_thread.start()
-    print("✓ 后台处理线程已启动...")
-
     if not args.no_viz:
-        window_name = 'OAK ReID Auto Tracking'
+        window_name = 'ReID ROS2 Tracking'
         cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
-        while not stop_event.is_set():
+        
+        while rclpy.ok():
+            rclpy.spin_once(reid_node, timeout_sec=0.01)
             try:
-                display_frame = result_queue.get(timeout=2)
+                display_frame = reid_node.result_queue.get_nowait()
                 cv2.imshow(window_name, display_frame)
             except queue.Empty:
-                if not processing_thread.is_alive():
-                    print("❌ 处理线程已意外终止。")
-                    break
-                continue
+                pass
 
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'): stop_event.set()
+            if key == ord('q'):
+                break
             elif key == ord('r'):
                 print("键盘 'R' 已按下，发送开始信号...")
-                start_event.set()
-
+                reid_node.start_event.set()
+        
         cv2.destroyAllWindows()
     else:
+        # 在无头模式下运行
         try:
-            while not stop_event.is_set(): time.sleep(1)
+            rclpy.spin(reid_node)
         except KeyboardInterrupt:
-            stop_event.set()
+            pass
 
-    print("正在停止所有线程...")
-    stop_event.set()
-    capture_thread.stop()
-    capture_thread.join(timeout=2)
-    processing_thread.join(timeout=5)
-    camera_manager.close()
+    # 清理
+    reid_node.stop_all_threads()
+    reid_node.destroy_node()
+    rclpy.shutdown()
     print("程序已安全退出。")
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='OAK ReID Auto Tracking with gRPC')
+    parser = argparse.ArgumentParser(description='ROS2 ReID Auto Tracking')
     parser.add_argument('--model-path', type=str, default='yolo11n.pt', help='YOLOv8模型路径')
     parser.add_argument('--dist-thres', type=float, default=1.2, help='ReID距离阈值')
     parser.add_argument('--conf-thres', type=float, default=0.5, help='YOLO检测置信度阈值')

@@ -2,8 +2,6 @@
 # 描述: 自动选择中心目标，由gRPC指令或键盘'R'键触发，进行10秒特征捕获后开始跟踪。
 # 版本: v4.2 - 优化了可视化逻辑，确保跟踪框稳定显示。
 
-
-# ros2 topic pub /start_vision std_msgs/msg/Int32 "{data: 1}"
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -21,6 +19,7 @@ import torch.nn.functional as F
 from pathlib import Path
 from PIL import Image
 import json
+import subprocess as sp
 
 # 导入生成的gRPC模块
 try:
@@ -171,7 +170,7 @@ class TrackingGRPCClient:
 # ==============================================================================
 # OAK相机与ReID核心逻辑
 # ==============================================================================
-def create_camera_pipeline():
+def create_camera_pipeline(rtsp_enabled=True, rtsp_width=1920, rtsp_height=1080, rtsp_quality=100):
     pipeline = dai.Pipeline()
     cam_rgb = pipeline.create(dai.node.ColorCamera)
     mono_left = pipeline.create(dai.node.MonoCamera)
@@ -181,12 +180,33 @@ def create_camera_pipeline():
     xout_depth = pipeline.create(dai.node.XLinkOut)
     xout_rgb.setStreamName("rgb")
     xout_depth.setStreamName("depth")
+    
+    # RGB相机配置
     cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
     cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
     cam_rgb.setPreviewSize(640, 480)
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
     cam_rgb.setFps(30)
+    
+    # 如果启用RTSP，设置视频尺寸和编码器
+    if rtsp_enabled:
+        cam_rgb.setVideoSize(rtsp_width, rtsp_height)
+        # 创建视频编码器
+        videnc = pipeline.create(dai.node.VideoEncoder)
+        videnc.setDefaultProfilePreset(30, dai.VideoEncoderProperties.Profile.H264_MAIN)
+        videnc.setKeyframeFrequency(30 * 4)  # 每4秒一个关键帧
+        videnc.setQuality(rtsp_quality)
+        
+        # 连接视频编码器
+        cam_rgb.video.link(videnc.input)
+        
+        # 创建编码视频输出
+        xout_encoded = pipeline.create(dai.node.XLinkOut)
+        xout_encoded.setStreamName("encoded")
+        videnc.bitstream.link(xout_encoded.input)
+    
+    # 双目深度相机配置
     mono_left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     mono_right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
     mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
@@ -197,10 +217,13 @@ def create_camera_pipeline():
     stereo.setLeftRightCheck(True)
     stereo.setExtendedDisparity(False)
     stereo.setSubpixel(False)
+    
+    # 连接节点
     mono_left.out.link(stereo.left)
     mono_right.out.link(stereo.right)
     cam_rgb.preview.link(xout_rgb.input)
     stereo.depth.link(xout_depth.input)
+    
     return pipeline
 
 def calculate_3d_coordinates(depth_map, center_point, size=None):
@@ -257,14 +280,88 @@ def find_center_person(frame, yolo_model):
 
 
 # ==============================================================================
+# RTSP 推送线程
+# ==============================================================================
+class RTSPStreamThread(threading.Thread):
+    def __init__(self, device, rtsp_host, rtsp_port, stream_id=0):
+        super().__init__()
+        self.device = device
+        self.rtsp_host = rtsp_host
+        self.rtsp_port = rtsp_port
+        self.stream_id = stream_id
+        self.running = True
+        self.ffmpeg_process = None
+        
+        # 检查设备协议
+        if hasattr(device, 'getDeviceInfo'):
+            dev_info = device.getDeviceInfo()
+            if dev_info.protocol != dai.XLinkProtocol.X_LINK_USB_VSC:
+                print(f"⚠️  RTSP流可能不稳定，当前协议: {dev_info.protocol}")
+        
+        # 构建FFmpeg命令
+        self.command = [
+            "ffmpeg",
+            "-fflags", "+genpts",
+            "-probesize", "100M",
+            "-i", "-",
+            "-framerate", "30",
+            "-vcodec", "copy",
+            "-v", "error",
+            "-f", "rtsp",
+            f"rtsp://{self.rtsp_host}:{self.rtsp_port}/preview/{self.stream_id}",
+        ]
+        
+    def run(self):
+        try:
+            # 启动FFmpeg进程
+            self.ffmpeg_process = sp.Popen(self.command, stdin=sp.PIPE)
+            print(f"📡 RTSP流已启动: rtsp://{self.rtsp_host}:{self.rtsp_port}/preview/{self.stream_id}")
+            
+            # 获取编码视频队列
+            encoded_queue = self.device.getOutputQueue("encoded", maxSize=40, blocking=True)
+            
+            # 推送视频流
+            while self.running:
+                try:
+                    # 获取编码数据
+                    encoded_data = encoded_queue.get()
+                    if self.ffmpeg_process and self.ffmpeg_process.poll() is None:
+                        self.ffmpeg_process.stdin.write(encoded_data.getData())
+                    else:
+                        break
+                except Exception as e:
+                    if self.running:
+                        print(f"❌ RTSP流推送错误: {e}")
+                    break
+                    
+        except Exception as e:
+            print(f"❌ 启动FFmpeg失败: {e}")
+            print("请确保已安装FFmpeg: sudo apt install ffmpeg")
+        finally:
+            self.stop()
+            
+    def stop(self):
+        self.running = False
+        if self.ffmpeg_process:
+            try:
+                self.ffmpeg_process.stdin.close()
+                self.ffmpeg_process.terminate()
+                self.ffmpeg_process.wait(timeout=2)
+            except:
+                self.ffmpeg_process.kill()
+            self.ffmpeg_process = None
+        print("📡 RTSP流已停止")
+
+
+# ==============================================================================
 # 多线程框架
 # ==============================================================================
 class CameraManager:
-    def __init__(self, max_retries=3, retry_delay=3):
+    def __init__(self, max_retries=3, retry_delay=3, rtsp_enabled=True, rtsp_width=1920, rtsp_height=1080, rtsp_quality=100):
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.device = None
-        self.pipeline = create_camera_pipeline()
+        self.pipeline = create_camera_pipeline(rtsp_enabled, rtsp_width, rtsp_height, rtsp_quality)
     def connect_camera(self):
         for attempt in range(self.max_retries):
             try:
@@ -360,9 +457,6 @@ class ProcessingThread(threading.Thread):
             
             # 1. 执行核心状态逻辑
             self.handle_state(frame)
-            # print("self.last_ros_command_active:111", self.last_ros_command_active)
-
-
 
             # 2. 如果启用，创建并发送可视化帧
             if self.enable_visualization:
@@ -384,6 +478,7 @@ class ProcessingThread(threading.Thread):
         
         elif self.state == 'CAPTURING':
             self.process_capturing(frame)
+
         elif self.state == 'TRACKING':
             self.process_tracking(frame)
             # 检查gRPC停止信号 (保持原有逻辑不变)
@@ -391,11 +486,6 @@ class ProcessingThread(threading.Thread):
                 self.last_grpc_check_time = time.time()
                 is_active, _ = self.grpc_client.get_command_state()
                 if not is_active and self.grpc_client.connected and not self.last_ros_command_active:
-
-                    # print("is_active:", is_active)
-                    # print("self.grpc_client.connected:", self.grpc_client.connected)
-                    # print("self.last_ros_command_active:", self.last_ros_command_active)
-
                     print("收到gRPC停止指令，返回待机状态。")
                     self.transition_to_idle()
                     return
@@ -447,8 +537,6 @@ class ProcessingThread(threading.Thread):
                         print("收到ROS2关闭跟随指令...")
                 
                 self.last_ros_command_active = new_active
-                # print(f"当前ROS2跟随状态: {new_active}")
-                # print(f"self.last_ros_command_active: {self.last_ros_command_active}")
                 self.ros_command_active = new_active
                 return self.ros_command_active
                 
@@ -502,7 +590,7 @@ class ProcessingThread(threading.Thread):
 
     def process_capturing(self, frame):
         time_elapsed = time.time() - self.capture_start_time
-        if time_elapsed > 3.0:
+        if time_elapsed > 10.0:
             if len(self.captured_features) > 0:
                 print(f"特征捕获完成，共 {len(self.captured_features)} 个。正在融合特征...")
                 feats_tensor = torch.cat(self.captured_features, dim=0)
@@ -513,7 +601,7 @@ class ProcessingThread(threading.Thread):
                 print("捕获失败，未采集到任何有效特征。")
                 self.transition_to_idle()
             return
-        if len(self.captured_features) < 5 and (time.time() - self.last_capture_time) > 0.6:
+        if len(self.captured_features) < 5 and (time.time() - self.last_capture_time) > 2.0:
             bbox = find_center_person(frame, self.yolo_model)
             if bbox:
                 (xmin, ymin, xmax, ymax) = bbox
@@ -627,9 +715,15 @@ class ProcessingThread(threading.Thread):
 # 主程序
 # ==============================================================================
 def main(args):
-    print("=== OAK ReID 自动指令跟踪系统 ===")
+    print("=== OAK ReID 自动指令跟踪系统 (支持RTSP) ===")
     
-    camera_manager = CameraManager()
+    # 创建相机管理器，支持RTSP配置
+    camera_manager = CameraManager(
+        rtsp_enabled=not args.no_rtsp,
+        rtsp_width=args.rtsp_width,
+        rtsp_height=args.rtsp_height,
+        rtsp_quality=args.rtsp_quality
+    )
     if not camera_manager.connect_camera(): return
     
     device = torch.device(args.device)
@@ -655,8 +749,20 @@ def main(args):
     capture_thread = FrameCaptureThread(camera_manager.get_device(), frame_queue)
     processing_thread = ProcessingThread(frame_queue, result_queue, stop_event, start_event, grpc_client, args, yolo_model, reid_model)
 
+    # 创建RTSP流线程
+    rtsp_thread = None
+    if not args.no_rtsp:
+        rtsp_thread = RTSPStreamThread(
+            camera_manager.get_device(),
+            args.rtsp_host,
+            args.rtsp_port,
+            stream_id=0
+        )
+
     capture_thread.start()
     processing_thread.start()
+    if rtsp_thread:
+        rtsp_thread.start()
     print("✓ 后台处理线程已启动...")
 
     if not args.no_viz:
@@ -690,11 +796,14 @@ def main(args):
     capture_thread.stop()
     capture_thread.join(timeout=2)
     processing_thread.join(timeout=5)
+    if rtsp_thread:
+        rtsp_thread.stop()
+        rtsp_thread.join(timeout=2)
     camera_manager.close()
     print("程序已安全退出。")
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='OAK ReID Auto Tracking with gRPC')
+    parser = argparse.ArgumentParser(description='OAK ReID Auto Tracking with gRPC and RTSP')
     parser.add_argument('--model-path', type=str, default='yolo11n.pt', help='YOLOv8模型路径')
     parser.add_argument('--dist-thres', type=float, default=1.2, help='ReID距离阈值')
     parser.add_argument('--conf-thres', type=float, default=0.5, help='YOLO检测置信度阈值')
@@ -703,6 +812,15 @@ def parse_args():
     parser.add_argument('--no-viz', action='store_true', help='禁用可视化界面')
     parser.add_argument('--no-grpc', action='store_true', help='禁用gRPC通信')
     parser.add_argument('--no-ros-export', action='store_true', help='禁用ROS2坐标导出')
+    
+    # RTSP 相关参数
+    parser.add_argument('--rtsp-host', default='0.0.0.0', type=str, help='RTSP服务器主机地址')
+    parser.add_argument('--rtsp-port', default=8554, type=int, help='RTSP服务器端口')
+    parser.add_argument('--rtsp-width', default=1920, type=int, help='RTSP视频宽度 (32的倍数)')
+    parser.add_argument('--rtsp-height', default=1080, type=int, help='RTSP视频高度 (8的倍数)')
+    parser.add_argument('--rtsp-quality', default=100, type=int, help='RTSP视频质量 (1-100)')
+    parser.add_argument('--no-rtsp', action='store_true', help='禁用RTSP流推送')
+    
     return parser.parse_args()
 
 if __name__ == '__main__':
@@ -710,4 +828,12 @@ if __name__ == '__main__':
     if args.device is None:
         args.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     print(f"使用的计算设备: {args.device}")
+    
+    # 显示RTSP配置信息
+    if not args.no_rtsp:
+        print(f"📡 RTSP配置: {args.rtsp_host}:{args.rtsp_port}/preview/0")
+        print(f"📡 视频质量: {args.rtsp_quality}, 分辨率: {args.rtsp_width}x{args.rtsp_height}")
+    else:
+        print("📡 RTSP流已禁用")
+    
     main(args)
