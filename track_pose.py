@@ -1034,14 +1034,14 @@ class MultiTargetManager:
                     
                     # ReID特征相似度 (权重0.7)
                     reid_sim = target.compare_signature(frame, (x1, y1, x2, y2))
-                    match_score += 0.7 * reid_sim
+                    match_score += 0.6 * reid_sim
                     
                     # 姿态相似度 (权重0.2)
                     pose_sim = 0.0
                     if keypoints_data is not None and i < len(keypoints_data):
                         keypoints = keypoints_data[i]
                         pose_sim = target.compare_pose(keypoints)
-                    match_score += 0.2 * pose_sim
+                    match_score += 0.3 * pose_sim
 
                     # 位置距离 (权重0.1)
                     if target.position:

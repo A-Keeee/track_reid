@@ -145,13 +145,13 @@ source ~/.bashrc
 
 # 启动 gRPC 服务端
 echo "正在启动 gRPC Server..."
-gnome-terminal --title="gRPC Server" -- bash -ic "source ~/anaconda3/etc/profile.d/conda.sh && conda activate yolo && python grpc_server.py"
+gnome-terminal --title="gRPC Server" -- bash -i -c "source ~/anaconda3/etc/profile.d/conda.sh && conda activate yolo && python grpc_server.py"
 echo "等待 5 秒以确保服务端完全启动..."
 sleep 5
 
 # 启动主跟踪程序
 echo "正在启动主跟踪程序 Track Pose..."
-gnome-terminal --title="Track Pose" -- bash -ic "source ~/anaconda3/etc/profile.d/conda.sh && conda activate yolo && python track_torch_ros.py --no-viz"
+gnome-terminal --title="Track Pose" -- bash -i -c "source ~/anaconda3/etc/profile.d/conda.sh && conda activate yolo && python track_torch_ros1.py --no-viz"
 echo "主跟踪程序已启动。"
 
 # --- 修改部分开始 ---
@@ -165,7 +165,7 @@ while true; do
     GRPC_SERVER_RUNNING=$?
 
     # 检查主跟踪程序是否仍在运行
-    pgrep -f "track_torch_ros.py" > /dev/null
+    pgrep -f "track_torch_ros1.py" > /dev/null
     TRACK_TORCH_RUNNING=$?
 
     # 如果两个进程中任何一个没有在运行 ($? 不为 0)，则执行清理并退出
@@ -177,12 +177,12 @@ while true; do
             echo "gRPC Server (grpc_server.py) 已停止运行。"
         fi
         if [ $TRACK_TORCH_RUNNING -ne 0 ]; then
-            echo "主跟踪程序 (track_torch_ros.py) 已停止运行。"
+            echo "主跟踪程序 (track_torch_ros1.py) 已停止运行。"
         fi
 
         # 使用 pkill 强制结束所有仍在运行的相关进程
         pkill -f "grpc_server.py"
-        pkill -f "track_torch_ros.py"
+        pkill -f "track_torch_ros1.py"
 
         echo "所有相关进程已被终止。监控脚本即将退出。"
         break # 退出 while 循环

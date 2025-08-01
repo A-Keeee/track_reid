@@ -64,7 +64,7 @@ class TrackingServiceImpl(tracking_pb2_grpc.TrackingServiceServicer):
                 self.tracking_start_time = time.time()
                 print(f"🎯 收到开启跟随指令: 开始跟随目标 ID {self.target_id}")
                 # 返回10秒倒计时，给用户准备时间
-                countdown_time = 10
+                countdown_time = 3
             else:
                 # 已经在跟随状态，更新目标ID
                 countdown_time = 0
