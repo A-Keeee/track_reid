@@ -39,6 +39,58 @@ from utils.plotting import plot_one_box
 
 
 # ==============================================================================
+# 骨架可视化辅助函数
+# ==============================================================================
+
+# COCO 17个关键点的连接顺序
+skeleton_connections = [
+    (5, 6), (5, 11), (6, 12), (11, 12),  # Torso
+    (5, 7), (7, 9),                      # Left Arm
+    (6, 8), (8, 10),                     # Right Arm
+    (11, 13), (13, 15),                  # Left Leg
+    (12, 14), (14, 16),                  # Right Leg
+    (0, 1), (0, 2), (1, 3), (2, 4)       # Head
+]
+
+#left_shouder = 5
+#right_shoulder = 6
+#left_hip = 11
+#right_hip = 12
+
+
+# 不同肢体的颜色 (BGR格式)
+limb_colors = [
+    (255, 192, 203), (255, 192, 203), (255, 192, 203), (255, 192, 203), # Torso - pink
+    (255, 0, 0), (255, 0, 0),           # Left arm - blue
+    (0, 0, 255), (0, 0, 255),           # Right arm - red
+    (0, 255, 0), (0, 255, 0),           # Left leg - green
+    (0, 255, 255), (0, 255, 255),       # Right leg - yellow
+    (255, 255, 0), (255, 255, 0), (255, 255, 0), (255, 255, 0) # Head - cyan
+]
+kpt_color = (255, 0, 255) # Keypoints - magenta
+
+def draw_skeleton(frame, keypoints, confidence, kpt_thresh=0.5):
+    """在图像上绘制骨架"""
+    if keypoints is None or confidence is None:
+        return
+
+    kpts = np.array(keypoints, dtype=np.int32)
+    
+    # 绘制骨骼连接
+    for i, (p1_idx, p2_idx) in enumerate(skeleton_connections):
+        if confidence[p1_idx] > kpt_thresh and confidence[p2_idx] > kpt_thresh:
+            pt1 = (kpts[p1_idx, 0], kpts[p1_idx, 1])
+            pt2 = (kpts[p2_idx, 0], kpts[p2_idx, 1])
+            cv2.line(frame, pt1, pt2, limb_colors[i], 2, cv2.LINE_AA)
+    
+    # 绘制关键点
+    for i in range(kpts.shape[0]):
+        if confidence[i] > kpt_thresh:
+            pt = (kpts[i, 0], kpts[i, 1])
+            cv2.circle(frame, pt, 3, kpt_color, -1, cv2.LINE_AA)
+
+
+# ==============================================================================
 # 坐标导出器 (用于ROS2集成)
 # ==============================================================================
 class CoordinateExporter:
@@ -252,31 +304,49 @@ def calculate_3d_coordinates(depth_map, center_point, size=None):
     if any(math.isnan(val) for val in (X_world, Y_world, Z_world)): return (0, 0, 0)
     return (X_world, Y_world, Z_world)
 
-def detect_all_persons(frame, model, conf_thres=0.5):
+def detect_all_poses(frame, model, conf_thres=0.5):
+    """使用YOLOv8-Pose模型检测所有人，并返回边界框和关键点"""
     results = model.predict(source=frame, show=False, classes=[0], conf=conf_thres, verbose=False)
-    boxes = []
-    if len(results[0].boxes) > 0:
-        for box in results[0].boxes:
+    detections = []
+    if len(results[0].boxes) > 0 and results[0].keypoints is not None:
+        for i in range(len(results[0].boxes)):
+            box = results[0].boxes[i]
             if box.conf[0] > conf_thres:
                 xmin, ymin, xmax, ymax = map(int, box.xyxy[0].cpu().numpy())
                 if (xmax - xmin) * (ymax - ymin) > 2000:
-                    boxes.append((xmin, ymin, xmax, ymax))
+                    keypoints = results[0].keypoints[i].xy.cpu().numpy()[0]
+                    keypoints_conf = results[0].keypoints[i].conf.cpu().numpy()[0]
+                    detections.append({
+                        'box': (xmin, ymin, xmax, ymax),
+                        'keypoints': keypoints,
+                        'keypoints_conf': keypoints_conf
+                    })
+    return detections
+
+def detect_all_persons(frame, model, conf_thres=0.5):
+    """兼容函数：从pose检测中提取边界框"""
+    pose_detections = detect_all_poses(frame, model, conf_thres)
+    boxes = []
+    for det in pose_detections:
+        boxes.append(det['box'])
     return boxes
 
 def find_center_person(frame, yolo_model):
-    boxes = detect_all_persons(frame, yolo_model)
-    if not boxes: return None
+    """在所有检测到的人中，找到最接近画面中心的一个"""
+    detections = detect_all_poses(frame, yolo_model)
+    if not detections: return None
     frame_center_x, frame_center_y = frame.shape[1] / 2, frame.shape[0] / 2
     min_dist = float('inf')
-    center_box = None
-    for (xmin, ymin, xmax, ymax) in boxes:
+    center_detection = None
+    for det in detections:
+        xmin, ymin, xmax, ymax = det['box']
         box_center_x = (xmin + xmax) / 2
         box_center_y = (ymin + ymax) / 2
         dist = math.sqrt((box_center_x - frame_center_x)**2 + (box_center_y - frame_center_y)**2)
         if dist < min_dist:
             min_dist = dist
-            center_box = (xmin, ymin, xmax, ymax)
-    return center_box
+            center_detection = det
+    return center_detection
 
 
 # ==============================================================================
@@ -436,6 +506,8 @@ class ProcessingThread(threading.Thread):
         
         # 可视化相关
         self.last_tracked_bbox = None
+        self.last_tracked_kpts = None
+        self.last_tracked_kpts_conf = None
         self.last_match_dist = 0.0
         self.last_coords = None
         self.status_message = "状态: 待机 (等待指令...)"
@@ -485,7 +557,7 @@ class ProcessingThread(threading.Thread):
             if self.grpc_client and (time.time() - self.last_grpc_check_time > 1.0):
                 self.last_grpc_check_time = time.time()
                 is_active, _ = self.grpc_client.get_command_state()
-                if not is_active and self.grpc_client.connected and not self.last_ros_command_active:
+                if not is_active and self.grpc_client.connected:
                     print("收到gRPC停止指令，返回待机状态。")
                     self.transition_to_idle()
                     return
@@ -577,8 +649,8 @@ class ProcessingThread(threading.Thread):
         return False
 
     def transition_to_capturing(self, frame):
-        initial_bbox = find_center_person(frame, self.yolo_model)
-        if initial_bbox is None:
+        initial_detection = find_center_person(frame, self.yolo_model)
+        if initial_detection is None:
             print("启动失败：画面中央未检测到目标。")
             return
         self.state = 'CAPTURING'
@@ -586,11 +658,11 @@ class ProcessingThread(threading.Thread):
         self.capture_start_time = time.time()
         self.last_capture_time = time.time() - 1.9
         self.status_message = "collecting... (0/5)"
-        print(f"目标锁定：{initial_bbox}。开始10秒特征捕获...")
+        print(f"目标锁定：{initial_detection['box']}。开始10秒特征捕获...")
 
     def process_capturing(self, frame):
         time_elapsed = time.time() - self.capture_start_time
-        if time_elapsed > 10.0:
+        if time_elapsed > 3.0:
             if len(self.captured_features) > 0:
                 print(f"特征捕获完成，共 {len(self.captured_features)} 个。正在融合特征...")
                 feats_tensor = torch.cat(self.captured_features, dim=0)
@@ -601,10 +673,10 @@ class ProcessingThread(threading.Thread):
                 print("捕获失败，未采集到任何有效特征。")
                 self.transition_to_idle()
             return
-        if len(self.captured_features) < 5 and (time.time() - self.last_capture_time) > 2.0:
-            bbox = find_center_person(frame, self.yolo_model)
-            if bbox:
-                (xmin, ymin, xmax, ymax) = bbox
+        if len(self.captured_features) < 5 and (time.time() - self.last_capture_time) > 0.6:
+            detection = find_center_person(frame, self.yolo_model)
+            if detection:
+                (xmin, ymin, xmax, ymax) = detection['box']
                 crop_img = frame[ymin:ymax, xmin:xmax]
                 if crop_img.size > 0:
                     crop_img_pil = Image.fromarray(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
@@ -621,20 +693,24 @@ class ProcessingThread(threading.Thread):
             self.transition_to_idle()
             return
         self.status_message = "tracking..."
-        person_boxes = detect_all_persons(frame, self.yolo_model, self.args.conf_thres)
+        person_detections = detect_all_poses(frame, self.yolo_model, self.args.conf_thres)
         best_match_info = None
-        if person_boxes:
-            gallery_locs, gallery_feats = self.extract_gallery_features(frame, person_boxes)
+        if person_detections:
+            valid_detections, gallery_feats = self.extract_gallery_features(frame, person_detections)
             if gallery_feats is not None:
                 distmat = self.calculate_distance_matrix(gallery_feats)
                 best_g_idx = np.argmin(distmat[0])
                 min_dist = distmat[0, best_g_idx]
                 if min_dist < self.args.dist_thres:
-                    best_match_info = {'bbox': gallery_locs[best_g_idx], 'dist': min_dist}
+                    best_detection = valid_detections[best_g_idx]
+                    best_match_info = {'detection': best_detection, 'dist': min_dist}
         
         # 更新状态用于可视化和发送
         if best_match_info:
-            self.last_tracked_bbox = best_match_info['bbox']
+            best_detection = best_match_info['detection']
+            self.last_tracked_bbox = best_detection['box']
+            self.last_tracked_kpts = best_detection['keypoints']
+            self.last_tracked_kpts_conf = best_detection['keypoints_conf']
             self.last_match_dist = best_match_info['dist']
             center = ((self.last_tracked_bbox[0] + self.last_tracked_bbox[2]) / 2, (self.last_tracked_bbox[1] + self.last_tracked_bbox[3]) / 2)
             size = (self.last_tracked_bbox[2] - self.last_tracked_bbox[0], self.last_tracked_bbox[3] - self.last_tracked_bbox[1])
@@ -645,6 +721,8 @@ class ProcessingThread(threading.Thread):
                 self.last_coords = None
         else:
             self.last_tracked_bbox = None
+            self.last_tracked_kpts = None
+            self.last_tracked_kpts_conf = None
             self.last_coords = None
 
         # 发送坐标 - 如果没有检测到目标，发送 (0, 0, 0)
@@ -669,13 +747,20 @@ class ProcessingThread(threading.Thread):
         
         # 根据状态绘制不同的框
         if self.state == 'CAPTURING':
-            bbox = find_center_person(vis_frame, self.yolo_model)
-            if bbox: plot_one_box(bbox, vis_frame, label='Capturing...', color=(0, 165, 255))
+            detection = find_center_person(vis_frame, self.yolo_model)
+            if detection: 
+                plot_one_box(detection['box'], vis_frame, label='Capturing...', color=(0, 165, 255))
+                # 绘制骨架
+                if 'keypoints' in detection and 'keypoints_conf' in detection:
+                    draw_skeleton(vis_frame, detection['keypoints'], detection['keypoints_conf'])
         elif self.state == 'TRACKING' and self.last_tracked_bbox:
             label = f"Target | Dist: {self.last_match_dist:.2f}"
             if self.last_coords:
                 label += f' | Coords: {self.last_coords[0]:.1f}, {self.last_coords[1]:.1f}, {self.last_coords[2]:.1f}m'
             plot_one_box(self.last_tracked_bbox, vis_frame, label=label, color=(0,255,0))
+            # 绘制跟踪目标的骨架
+            if self.last_tracked_kpts is not None and self.last_tracked_kpts_conf is not None:
+                draw_skeleton(vis_frame, self.last_tracked_kpts, self.last_tracked_kpts_conf)
         
         # 绘制固定的UI元素
         self.frame_count += 1
@@ -688,20 +773,26 @@ class ProcessingThread(threading.Thread):
         cv2.putText(vis_frame, self.status_message, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         return vis_frame
 
-    def extract_gallery_features(self, frame, person_boxes):
-        gallery_locs, gallery_img_tensors = [], []
-        for xmin, ymin, xmax, ymax in person_boxes:
+    def extract_gallery_features(self, frame, person_detections):
+        valid_detections = []
+        gallery_img_tensors = []
+        for det in person_detections:
+            xmin, ymin, xmax, ymax = det['box']
             crop_img = frame[ymin:ymax, xmin:xmax]
             if crop_img.size > 0:
-                gallery_locs.append((xmin, ymin, xmax, ymax))
+                valid_detections.append(det)
                 crop_img_pil = Image.fromarray(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
                 gallery_img_tensors.append(build_transforms(reidCfg)(crop_img_pil).unsqueeze(0))
-        if not gallery_img_tensors: return None, None
+        
+        if not gallery_img_tensors: 
+            return None, None
+            
         gallery_img = torch.cat(gallery_img_tensors, dim=0).to(self.device)
         with torch.no_grad():
             gallery_feats = self.reid_model(gallery_img)
             gallery_feats = F.normalize(gallery_feats, dim=1, p=2)
-        return gallery_locs, gallery_feats
+            
+        return valid_detections, gallery_feats
 
     def calculate_distance_matrix(self, gallery_feats):
         m, n = self.query_feats.shape[0], gallery_feats.shape[0]
@@ -804,7 +895,7 @@ def main(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='OAK ReID Auto Tracking with gRPC and RTSP')
-    parser.add_argument('--model-path', type=str, default='yolo11n.pt', help='YOLOv8模型路径')
+    parser.add_argument('--model-path', type=str, default='yolo11n-pose.pt', help='YOLOv11-Pose模型路径')
     parser.add_argument('--dist-thres', type=float, default=1.2, help='ReID距离阈值')
     parser.add_argument('--conf-thres', type=float, default=0.5, help='YOLO检测置信度阈值')
     parser.add_argument('--device', type=str, default=None, help='计算设备 (e.g., cpu, cuda:0)')
