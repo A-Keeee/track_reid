@@ -38,7 +38,7 @@ from reid.modeling import build_model
 from utils.plotting import plot_one_box
 
 # 导入扩展卡尔曼滤波器
-from extended_kalman_filter import ExtendedKalmanFilter3D, AdaptiveEKF3D
+from extended_kalman_filter import ExtendedKalmanFilter3D, AdaptiveEKF3D, EnhancedEKF3D
 
 
 # ==============================================================================
@@ -524,26 +524,18 @@ class ProcessingThread(threading.Thread):
         self.last_grpc_check_time = 0
         self.current_depth_frame = None
         
-        # 扩展卡尔曼滤波器初始化
-        if args.use_adaptive_ekf:
-            self.ekf = AdaptiveEKF3D(
-                process_noise_std=args.ekf_process_noise,
-                measurement_noise_std=args.ekf_measurement_noise,
-                initial_velocity_std=args.ekf_velocity_std,
-                initial_acceleration_std=args.ekf_acceleration_std
-            )
-            print(f"🎯 使用自适应卡尔曼滤波器 (匀加速运动模型)")
-        else:
-            self.ekf = ExtendedKalmanFilter3D(
-                process_noise_std=args.ekf_process_noise,
-                measurement_noise_std=args.ekf_measurement_noise,
-                initial_velocity_std=args.ekf_velocity_std,
-                initial_acceleration_std=args.ekf_acceleration_std
-            )
-            print(f"🎯 使用标准卡尔曼滤波器 (匀加速运动模型)")
-        
+        # 扩展卡尔曼滤波器初始化 - 使用增强版EKF
+        print(f"🎯 使用增强版卡尔曼滤波器 (包含角速度的匀加速运动模型)")
+        self.ekf = EnhancedEKF3D(
+            process_noise_std=args.ekf_process_noise,
+            measurement_noise_std=args.ekf_measurement_noise,
+            initial_velocity_std=args.ekf_velocity_std,
+            initial_acceleration_std=args.ekf_acceleration_std,
+            initial_angular_velocity_std=getattr(args, 'ekf_angular_velocity_std', 0.3)
+        )
         print(f"   过程噪声: {args.ekf_process_noise}, 测量噪声: {args.ekf_measurement_noise}")
         print(f"   速度不确定性: {args.ekf_velocity_std}, 加速度不确定性: {args.ekf_acceleration_std}")
+        print(f"   角速度不确定性: {getattr(args, 'ekf_angular_velocity_std', 0.3)}")
         
         # 可视化相关
         self.last_tracked_bbox = None
@@ -600,7 +592,7 @@ class ProcessingThread(threading.Thread):
             if self.grpc_client and (time.time() - self.last_grpc_check_time > 1.0):
                 self.last_grpc_check_time = time.time()
                 is_active, _ = self.grpc_client.get_command_state()
-                if not is_active and self.grpc_client.connected:
+                if not is_active and self.grpc_client.connected and self.last_ros_command_active == False:
                     print("收到gRPC停止指令，返回待机状态。")
                     self.transition_to_idle()
                     return
@@ -636,11 +628,6 @@ class ProcessingThread(threading.Thread):
                 command = data.get('command', 0)
                 timestamp = data.get('timestamp', 0)
                 
-                # # 检查命令是否太旧（超过5秒）
-                # if time.time() - timestamp > 5.0:
-                #     self.ros_command_active = False
-                #     self.last_ros_command_active = False
-                #     return False
                 
                 new_active = (command == 1)
                 
@@ -784,12 +771,15 @@ class ProcessingThread(threading.Thread):
                         # 打印调试信息
                         velocity = self.ekf.get_current_velocity()
                         acceleration = self.ekf.get_current_acceleration()
+                        angular_velocity = self.ekf.get_current_angular_velocity()
+                        orientation = self.ekf.get_current_orientation()
                         uncertainty = self.ekf.get_position_uncertainty()
                         print(f"📍 原始: [{coords[0]:.2f}, {coords[1]:.2f}, {coords[2]:.2f}] | "
                               f"滤波: [{self.last_filtered_coords[0]:.2f}, {self.last_filtered_coords[1]:.2f}, {self.last_filtered_coords[2]:.2f}] | "
                               f"预测: [{self.last_predicted_coords[0]:.2f}, {self.last_predicted_coords[1]:.2f}, {self.last_predicted_coords[2]:.2f}]")
                         print(f"     速度: [{velocity[0]:.2f}, {velocity[1]:.2f}, {velocity[2]:.2f}] | "
                               f"加速度: [{acceleration[0]:.2f}, {acceleration[1]:.2f}, {acceleration[2]:.2f}] | "
+                              f"角速度: {angular_velocity:.3f} rad/s | 方向: {np.rad2deg(orientation):.1f}° | "
                               f"不确定性: {uncertainty:.3f}")
                 else:
                     self.last_coords = None
@@ -901,12 +891,14 @@ class ProcessingThread(threading.Thread):
             uncertainty = self.ekf.get_position_uncertainty()
             velocity = self.ekf.get_current_velocity()
             acceleration = self.ekf.get_current_acceleration()
-            ekf_status = f"EKF: Init | Unc: {uncertainty:.3f} | Vel: [{velocity[0]:.2f}, {velocity[1]:.2f}, {velocity[2]:.2f}]"
-            accel_status = f"Acc: [{acceleration[0]:.2f}, {acceleration[1]:.2f}, {acceleration[2]:.2f}]"
+            angular_velocity = self.ekf.get_current_angular_velocity()
+            orientation = self.ekf.get_current_orientation()
+            ekf_status = f"Enhanced EKF: Init | Unc: {uncertainty:.3f} | Vel: [{velocity[0]:.2f}, {velocity[1]:.2f}, {velocity[2]:.2f}]"
+            accel_status = f"Acc: [{acceleration[0]:.2f}, {acceleration[1]:.2f}, {acceleration[2]:.2f}] | ω: {angular_velocity:.3f} rad/s | θ: {np.rad2deg(orientation):.1f}°"
             cv2.putText(vis_frame, ekf_status, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
             cv2.putText(vis_frame, accel_status, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         else:
-            cv2.putText(vis_frame, "EKF: Not Initialized", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
+            cv2.putText(vis_frame, "Enhanced EKF: Not Initialized", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
             
         return vis_frame
 
@@ -1050,11 +1042,12 @@ def parse_args():
     parser.add_argument('--no-rtsp', action='store_true', help='禁用RTSP流推送')
     
     # 卡尔曼滤波器参数
-    parser.add_argument('--ekf-process-noise', type=float, default=0.1, help='卡尔曼滤波器过程噪声标准差')
-    parser.add_argument('--ekf-measurement-noise', type=float, default=0.3, help='卡尔曼滤波器测量噪声标准差')
-    parser.add_argument('--ekf-velocity-std', type=float, default=0.5, help='卡尔曼滤波器初始速度不确定性标准差')
-    parser.add_argument('--ekf-acceleration-std', type=float, default=0.2, help='卡尔曼滤波器初始加速度不确定性标准差')
-    parser.add_argument('--use-adaptive-ekf', action='store_true', help='使用自适应卡尔曼滤波器')
+    parser.add_argument('--ekf-process-noise', type=float, default=1.0, help='卡尔曼滤波器过程噪声标准差')
+    parser.add_argument('--ekf-measurement-noise', type=float, default=10.0, help='卡尔曼滤波器测量噪声标准差')
+    parser.add_argument('--ekf-velocity-std', type=float, default=0.1, help='卡尔曼滤波器初始速度不确定性标准差')
+    parser.add_argument('--ekf-acceleration-std', type=float, default=0.5, help='卡尔曼滤波器初始加速度不确定性标准差')
+    parser.add_argument('--ekf-angular-velocity-std', type=float, default=0.4, help='卡尔曼滤波器初始角速度不确定性标准差')
+    parser.add_argument('--use-adaptive-ekf', action='store_true', help='使用自适应卡尔曼滤波器（已弃用，现在默认使用增强版EKF）')
     
     return parser.parse_args()
 
@@ -1064,6 +1057,8 @@ if __name__ == '__main__':
         args.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     print(f"使用的计算设备: {args.device}")
     
+
+
     # 显示卡尔曼滤波器配置信息
     ekf_type = "自适应" if args.use_adaptive_ekf else "标准"
     print(f"🎯 卡尔曼滤波器配置: {ekf_type}EKF (匀加速运动模型)")
