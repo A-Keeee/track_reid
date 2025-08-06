@@ -1,7 +1,12 @@
 # REID+姿态+前10s无重复特征+gRPC通信
 # 
 # 性能优化版本 - 单目标跟踪系统
-# 
+
+ 
+ 
+# （reid+pose）重识别+grpc 
+
+  
 import cv2
 import numpy as np
 from ultralytics import YOLO

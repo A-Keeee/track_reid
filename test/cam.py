@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# 相机测试脚本
+
 import cv2
 import numpy as np
 import depthai as dai

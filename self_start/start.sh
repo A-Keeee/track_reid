@@ -151,7 +151,7 @@ sleep 5
 
 # 启动主跟踪程序
 echo "正在启动主跟踪程序 Track Pose..."
-gnome-terminal --title="Track Pose" -- bash -i -c "source ~/anaconda3/etc/profile.d/conda.sh && conda activate yolo && python track_torch_ros1.py --no-viz"
+gnome-terminal --title="Track Pose" -- bash -i -c "source ~/anaconda3/etc/profile.d/conda.sh && conda activate yolo && python track.py --no-viz"
 echo "主跟踪程序已启动。"
 
 # --- 修改部分开始 ---

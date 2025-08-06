@@ -2,6 +2,8 @@
 # 描述: 自动选择中心目标，由gRPC指令或键盘'R'键触发，进行10秒特征捕获后开始跟踪。
 # 版本: v4.2 - 优化了可视化逻辑，确保跟踪框稳定显示。
 
+# 骨架+ros+gRPC+ReID+OAK-D跟踪脚本（有rtsp）
+
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -36,9 +38,6 @@ from reid.data.transforms import build_transforms
 from reid.config import cfg as reidCfg
 from reid.modeling import build_model
 from utils.plotting import plot_one_box
-
-# 导入扩展卡尔曼滤波器
-from extended_kalman_filter import ExtendedKalmanFilter3D, AdaptiveEKF3D, EnhancedEKF3D
 
 
 # ==============================================================================
@@ -390,34 +389,17 @@ class RTSPStreamThread(threading.Thread):
             self.ffmpeg_process = sp.Popen(self.command, stdin=sp.PIPE)
             print(f"📡 RTSP流已启动: rtsp://{self.rtsp_host}:{self.rtsp_port}/preview/{self.stream_id}")
             
-            # 获取编码视频队列，使用非阻塞模式避免卡死
-            encoded_queue = self.device.getOutputQueue("encoded", maxSize=40, blocking=False)
+            # 获取编码视频队列
+            encoded_queue = self.device.getOutputQueue("encoded", maxSize=40, blocking=True)
             
             # 推送视频流
             while self.running:
                 try:
-                    # 获取编码数据，使用超时避免无限阻塞
-                    try:
-                        encoded_data = encoded_queue.get()
-                        if encoded_data is None:
-                            time.sleep(0.01)  # 短暂休眠避免CPU占用过高
-                            continue
-                    except:
-                        time.sleep(0.01)
-                        continue
-                        
+                    # 获取编码数据
+                    encoded_data = encoded_queue.get()
                     if self.ffmpeg_process and self.ffmpeg_process.poll() is None:
-                        try:
-                            self.ffmpeg_process.stdin.write(encoded_data.getData())
-                            self.ffmpeg_process.stdin.flush()  # 确保数据被写入
-                        except BrokenPipeError:
-                            print("❌ RTSP流管道断开")
-                            break
-                        except Exception as e:
-                            print(f"❌ 写入RTSP流数据失败: {e}")
-                            break
+                        self.ffmpeg_process.stdin.write(encoded_data.getData())
                     else:
-                        print("❌ FFmpeg进程已终止")
                         break
                 except Exception as e:
                     if self.running:
@@ -524,27 +506,12 @@ class ProcessingThread(threading.Thread):
         self.last_grpc_check_time = 0
         self.current_depth_frame = None
         
-        # 扩展卡尔曼滤波器初始化 - 使用增强版EKF
-        print(f"🎯 使用增强版卡尔曼滤波器 (包含角速度的匀加速运动模型)")
-        self.ekf = EnhancedEKF3D(
-            process_noise_std=args.ekf_process_noise,
-            measurement_noise_std=args.ekf_measurement_noise,
-            initial_velocity_std=args.ekf_velocity_std,
-            initial_acceleration_std=args.ekf_acceleration_std,
-            initial_angular_velocity_std=getattr(args, 'ekf_angular_velocity_std', 0.3)
-        )
-        print(f"   过程噪声: {args.ekf_process_noise}, 测量噪声: {args.ekf_measurement_noise}")
-        print(f"   速度不确定性: {args.ekf_velocity_std}, 加速度不确定性: {args.ekf_acceleration_std}")
-        print(f"   角速度不确定性: {getattr(args, 'ekf_angular_velocity_std', 0.3)}")
-        
         # 可视化相关
         self.last_tracked_bbox = None
         self.last_tracked_kpts = None
         self.last_tracked_kpts_conf = None
         self.last_match_dist = 0.0
         self.last_coords = None
-        self.last_filtered_coords = None  # 滤波后的坐标
-        self.last_predicted_coords = None  # 预测的坐标
         self.status_message = "状态: 待机 (等待指令...)"
         self.fps = 0
         self.frame_count = 0
@@ -592,7 +559,7 @@ class ProcessingThread(threading.Thread):
             if self.grpc_client and (time.time() - self.last_grpc_check_time > 1.0):
                 self.last_grpc_check_time = time.time()
                 is_active, _ = self.grpc_client.get_command_state()
-                if not is_active and self.grpc_client.connected and self.last_ros_command_active == False:
+                if not is_active and self.grpc_client.connected:
                     print("收到gRPC停止指令，返回待机状态。")
                     self.transition_to_idle()
                     return
@@ -628,6 +595,11 @@ class ProcessingThread(threading.Thread):
                 command = data.get('command', 0)
                 timestamp = data.get('timestamp', 0)
                 
+                # # 检查命令是否太旧（超过5秒）
+                # if time.time() - timestamp > 5.0:
+                #     self.ros_command_active = False
+                #     self.last_ros_command_active = False
+                #     return False
                 
                 new_active = (command == 1)
                 
@@ -725,8 +697,6 @@ class ProcessingThread(threading.Thread):
         self.status_message = "tracking..."
         person_detections = detect_all_poses(frame, self.yolo_model, self.args.conf_thres)
         best_match_info = None
-        current_time = time.time()
-        
         if person_detections:
             valid_detections, gallery_feats = self.extract_gallery_features(frame, person_detections)
             if gallery_feats is not None:
@@ -746,90 +716,24 @@ class ProcessingThread(threading.Thread):
             self.last_match_dist = best_match_info['dist']
             center = ((self.last_tracked_bbox[0] + self.last_tracked_bbox[2]) / 2, (self.last_tracked_bbox[1] + self.last_tracked_bbox[3]) / 2)
             size = (self.last_tracked_bbox[2] - self.last_tracked_bbox[0], self.last_tracked_bbox[3] - self.last_tracked_bbox[1])
-            
             if self.current_depth_frame is not None:
                 coords = calculate_3d_coordinates(self.current_depth_frame, center, size)
-                if coords != (0,0,0):
-                    self.last_coords = coords
-                    
-                    # 使用卡尔曼滤波器处理坐标
-                    measurement = np.array([coords[0], coords[1], coords[2]])
-                    
-                    if not self.ekf.is_initialized():
-                        # 初始化卡尔曼滤波器
-                        self.ekf.initialize(measurement, current_time)
-                        self.last_filtered_coords = coords
-                        self.last_predicted_coords = coords
-                        print(f"🎯 卡尔曼滤波器已初始化: [{coords[0]:.2f}, {coords[1]:.2f}, {coords[2]:.2f}]")
-                    else:
-                        # 预测和更新
-                        self.ekf.predict(current_time)
-                        filtered_state = self.ekf.update(measurement)
-                        self.last_filtered_coords = self.ekf.get_current_position()
-                        self.last_predicted_coords = self.ekf.predict_future_position(0.2)  # 预测0.2秒后的位置
-                        
-                        # 打印调试信息
-                        velocity = self.ekf.get_current_velocity()
-                        acceleration = self.ekf.get_current_acceleration()
-                        angular_velocity = self.ekf.get_current_angular_velocity()
-                        orientation = self.ekf.get_current_orientation()
-                        uncertainty = self.ekf.get_position_uncertainty()
-                        print(f"📍 原始: [{coords[0]:.2f}, {coords[1]:.2f}, {coords[2]:.2f}] | "
-                              f"滤波: [{self.last_filtered_coords[0]:.2f}, {self.last_filtered_coords[1]:.2f}, {self.last_filtered_coords[2]:.2f}] | "
-                              f"预测: [{self.last_predicted_coords[0]:.2f}, {self.last_predicted_coords[1]:.2f}, {self.last_predicted_coords[2]:.2f}]")
-                        print(f"     速度: [{velocity[0]:.2f}, {velocity[1]:.2f}, {velocity[2]:.2f}] | "
-                              f"加速度: [{acceleration[0]:.2f}, {acceleration[1]:.2f}, {acceleration[2]:.2f}] | "
-                              f"角速度: {angular_velocity:.3f} rad/s | 方向: {np.rad2deg(orientation):.1f}° | "
-                              f"不确定性: {uncertainty:.3f}")
-                else:
-                    self.last_coords = None
-                    # 处理目标丢失情况
-                    if self.ekf.is_initialized():
-                        predicted_pos = self.ekf.handle_lost_target(current_time)
-                        if predicted_pos is not None:
-                            self.last_filtered_coords = predicted_pos
-                            self.last_predicted_coords = self.ekf.predict_future_position(0.2)
-                            print(f"🔍 目标丢失，使用预测位置: [{predicted_pos[0]:.2f}, {predicted_pos[1]:.2f}, {predicted_pos[2]:.2f}]")
-                        else:
-                            self.last_filtered_coords = None
-                            self.last_predicted_coords = None
+                self.last_coords = coords if coords != (0,0,0) else None
             else:
                 self.last_coords = None
-                self.last_filtered_coords = None
-                self.last_predicted_coords = None
         else:
             self.last_tracked_bbox = None
             self.last_tracked_kpts = None
             self.last_tracked_kpts_conf = None
             self.last_coords = None
-            
-            # 处理目标丢失情况
-            if self.ekf.is_initialized():
-                predicted_pos = self.ekf.handle_lost_target(current_time)
-                if predicted_pos is not None:
-                    self.last_filtered_coords = predicted_pos
-                    self.last_predicted_coords = self.ekf.predict_future_position(0.2)
-                    print(f"🔍 目标丢失，使用预测位置: [{predicted_pos[0]:.2f}, {predicted_pos[1]:.2f}, {predicted_pos[2]:.2f}]")
-                else:
-                    self.last_filtered_coords = None
-                    self.last_predicted_coords = None
-                    self.ekf.reset()  # 重置滤波器
-                    print("🔄 目标丢失时间过长，滤波器已重置")
-            else:
-                self.last_filtered_coords = None
-                self.last_predicted_coords = None
 
-        # 发送坐标 - 优先发送滤波后的坐标，其次是原始坐标，最后是 (0, 0, 0)
-        coords_to_send = (0.0, 0.0, 0.0)
-        if self.last_filtered_coords:
-            coords_to_send = self.last_filtered_coords
-        elif self.last_coords:
-            coords_to_send = self.last_coords
+        # 发送坐标 - 如果没有检测到目标，发送 (0, 0, 0)
+        coords_to_send = self.last_coords if self.last_coords else (0.0, 0.0, 0.0)
         
         if self.grpc_client:
             self.grpc_client.send_target_coordinates(coords_to_send)
             
-        # 导出坐标到文件 (用于ROS2集成) - 使用滤波后的坐标
+        # 导出坐标到文件 (用于ROS2集成)
         if self.coord_exporter:
             self.coord_exporter.export_coordinates(coords_to_send)
 
@@ -839,11 +743,6 @@ class ProcessingThread(threading.Thread):
         self.state = 'IDLE'
         self.query_feats = None
         self.captured_features = []
-        # 重置卡尔曼滤波器
-        self.ekf.reset()
-        self.last_filtered_coords = None
-        self.last_predicted_coords = None
-        print("🔄 转换到待机状态，卡尔曼滤波器已重置")
 
     def create_visualization(self, frame):
         vis_frame = frame.copy()
@@ -858,19 +757,8 @@ class ProcessingThread(threading.Thread):
                     draw_skeleton(vis_frame, detection['keypoints'], detection['keypoints_conf'])
         elif self.state == 'TRACKING' and self.last_tracked_bbox:
             label = f"Target | Dist: {self.last_match_dist:.2f}"
-            
-            # 显示原始坐标
             if self.last_coords:
-                label += f' | Raw: {self.last_coords[0]:.1f}, {self.last_coords[1]:.1f}, {self.last_coords[2]:.1f}m'
-            
-            # 显示滤波后的坐标
-            if self.last_filtered_coords:
-                label += f' | Filtered: {self.last_filtered_coords[0]:.1f}, {self.last_filtered_coords[1]:.1f}, {self.last_filtered_coords[2]:.1f}m'
-            
-            # 显示预测坐标
-            if self.last_predicted_coords:
-                label += f' | Pred: {self.last_predicted_coords[0]:.1f}, {self.last_predicted_coords[1]:.1f}, {self.last_predicted_coords[2]:.1f}m'
-            
+                label += f' | Coords: {self.last_coords[0]:.1f}, {self.last_coords[1]:.1f}, {self.last_coords[2]:.1f}m'
             plot_one_box(self.last_tracked_bbox, vis_frame, label=label, color=(0,255,0))
             # 绘制跟踪目标的骨架
             if self.last_tracked_kpts is not None and self.last_tracked_kpts_conf is not None:
@@ -885,21 +773,6 @@ class ProcessingThread(threading.Thread):
         
         cv2.putText(vis_frame, f"FPS: {self.fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(vis_frame, self.status_message, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        
-        # 显示卡尔曼滤波器状态
-        if self.ekf.is_initialized():
-            uncertainty = self.ekf.get_position_uncertainty()
-            velocity = self.ekf.get_current_velocity()
-            acceleration = self.ekf.get_current_acceleration()
-            angular_velocity = self.ekf.get_current_angular_velocity()
-            orientation = self.ekf.get_current_orientation()
-            ekf_status = f"Enhanced EKF: Init | Unc: {uncertainty:.3f} | Vel: [{velocity[0]:.2f}, {velocity[1]:.2f}, {velocity[2]:.2f}]"
-            accel_status = f"Acc: [{acceleration[0]:.2f}, {acceleration[1]:.2f}, {acceleration[2]:.2f}] | ω: {angular_velocity:.3f} rad/s | θ: {np.rad2deg(orientation):.1f}°"
-            cv2.putText(vis_frame, ekf_status, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            cv2.putText(vis_frame, accel_status, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-        else:
-            cv2.putText(vis_frame, "Enhanced EKF: Not Initialized", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
-            
         return vis_frame
 
     def extract_gallery_features(self, frame, person_detections):
@@ -1041,14 +914,6 @@ def parse_args():
     parser.add_argument('--rtsp-quality', default=100, type=int, help='RTSP视频质量 (1-100)')
     parser.add_argument('--no-rtsp', action='store_true', help='禁用RTSP流推送')
     
-    # 卡尔曼滤波器参数
-    parser.add_argument('--ekf-process-noise', type=float, default=1.0, help='卡尔曼滤波器过程噪声标准差')
-    parser.add_argument('--ekf-measurement-noise', type=float, default=10.0, help='卡尔曼滤波器测量噪声标准差')
-    parser.add_argument('--ekf-velocity-std', type=float, default=0.1, help='卡尔曼滤波器初始速度不确定性标准差')
-    parser.add_argument('--ekf-acceleration-std', type=float, default=0.5, help='卡尔曼滤波器初始加速度不确定性标准差')
-    parser.add_argument('--ekf-angular-velocity-std', type=float, default=0.4, help='卡尔曼滤波器初始角速度不确定性标准差')
-    parser.add_argument('--use-adaptive-ekf', action='store_true', help='使用自适应卡尔曼滤波器（已弃用，现在默认使用增强版EKF）')
-    
     return parser.parse_args()
 
 if __name__ == '__main__':
@@ -1056,16 +921,6 @@ if __name__ == '__main__':
     if args.device is None:
         args.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     print(f"使用的计算设备: {args.device}")
-    
-
-
-    # 显示卡尔曼滤波器配置信息
-    ekf_type = "自适应" if args.use_adaptive_ekf else "标准"
-    print(f"🎯 卡尔曼滤波器配置: {ekf_type}EKF (匀加速运动模型)")
-    print(f"   过程噪声: {args.ekf_process_noise}")
-    print(f"   测量噪声: {args.ekf_measurement_noise}")
-    print(f"   速度不确定性: {args.ekf_velocity_std}")
-    print(f"   加速度不确定性: {args.ekf_acceleration_std}")
     
     # 显示RTSP配置信息
     if not args.no_rtsp:

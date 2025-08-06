@@ -3,6 +3,13 @@
 #       坐标以固定的10Hz频率通过gRPC发送。
 # 版本: v4.3 - 重构gRPC发送逻辑，实现10Hz固定频率坐标发送。
 
+
+
+
+# torch_reid+grpc+10Hz
+
+
+
 import cv2
 import numpy as np
 from ultralytics import YOLO
