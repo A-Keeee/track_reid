@@ -312,7 +312,6 @@ def calculate_3d_coordinates(depth_map, center_point, size=None):
     return (X_world, Y_world, Z_world)
 
 def detect_all_poses(frame, model, conf_thres=0.5):
-    """使用YOLOv8-Pose模型检测所有人，并返回边界框和关键点"""
     results = model.predict(source=frame, show=False, classes=[0], conf=conf_thres, verbose=False)
     detections = []
     if len(results[0].boxes) > 0 and results[0].keypoints is not None:
@@ -463,7 +462,7 @@ class CameraManager:
                 # self.device = dai.Device(self.pipeline)
 
                 # usb模式设置
-                self.device = dai.Device(self.pipeline, usb2Mode=True)
+                self.device = dai.Device(self.pipeline)
                 print("OAK相机连接成功！")
                 return True
             except Exception as e:
@@ -1031,7 +1030,7 @@ def main(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description='OAK ReID Auto Tracking with gRPC and RTSP')
-    parser.add_argument('--model-path', type=str, default='yolo11n-pose.pt', help='YOLOv11-Pose模型路径')
+    parser.add_argument('--model-path', type=str, default='models/yolo11n-pose.pt', help='YOLOv11-Pose模型路径')
     parser.add_argument('--dist-thres', type=float, default=1.2, help='ReID距离阈值')
     parser.add_argument('--conf-thres', type=float, default=0.5, help='YOLO检测置信度阈值')
     parser.add_argument('--device', type=str, default=None, help='计算设备 (e.g., cpu, cuda:0)')
