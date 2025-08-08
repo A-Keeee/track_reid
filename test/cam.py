@@ -146,7 +146,7 @@ with device:
                 startTime = current_time
             # --------------------
             frameRgb = latestPacket["rgb"].getCvFrame()
-            cv2.6(rgbWindowName, frameRgb)
+            cv2.imshow(rgbWindowName, frameRgb)
 
         if latestPacket["disp"] is not None:
             frameDisp = latestPacket["disp"].getFrame()

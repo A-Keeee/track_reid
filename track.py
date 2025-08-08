@@ -2,7 +2,7 @@
 # 描述: 自动选择中心目标，由gRPC指令或键盘'R'键触发，进行10秒特征捕获后开始跟踪。
 # 版本: v4.2 - 优化了可视化逻辑，确保跟踪框稳定显示。
 
-
+# track主程序
 # ekf+pose+ekf+ros2+grpc（有rtsp）
 
 
@@ -460,7 +460,10 @@ class CameraManager:
         for attempt in range(self.max_retries):
             try:
                 print(f"尝试连接OAK相机... (第 {attempt + 1}/{self.max_retries} 次)")
-                self.device = dai.Device(self.pipeline)
+                # self.device = dai.Device(self.pipeline)
+
+                # usb模式设置
+                self.device = dai.Device(self.pipeline, usb2Mode=True)
                 print("OAK相机连接成功！")
                 return True
             except Exception as e:
