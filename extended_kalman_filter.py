@@ -4,12 +4,6 @@ from typing import Tuple, Optional
 
 
 class ExtendedKalmanFilter3D:
-    """
-    三维坐标的扩展卡尔曼滤波器 - 匀加速运动模型
-    状态向量: [x, y, z, vx, vy, vz, ax, ay, az]
-    观测向量: [x, y, z]
-    """
-    
     def __init__(self, 
                  process_noise_std: float = 0.1,
                  measurement_noise_std: float = 0.2,
@@ -434,13 +428,13 @@ class EnhancedEKF3D:
         
         # 基于角速度更新速度方向
         current_speed = np.sqrt(vx**2 + vy**2)
-        if current_speed > 0.1:  # 只有在有显著运动时才应用角速度
+        if current_speed > 0.3:  # 提高阈值，只有在有显著运动时才应用角速度
             # 更新水平面速度分量
             new_vx = current_speed * np.sin(new_theta)
             new_vy = current_speed * np.cos(new_theta)
             
-            # 平滑过渡，避免突变
-            alpha = 0.7  # 平滑因子
+            # 更保守的平滑过渡，减少突变
+            alpha = 0.3  # 降低平滑因子，更保守
             vx = alpha * new_vx + (1 - alpha) * vx
             vy = alpha * new_vy + (1 - alpha) * vy
         
@@ -519,7 +513,7 @@ class EnhancedEKF3D:
         vx, vy = self.x[3, 0], self.x[4, 0]
         current_speed = np.sqrt(vx**2 + vy**2)
         
-        if current_speed > 0.2:  # 只有在有显著运动时才更新角度和角速度
+        if current_speed > 0.4:  # 提高阈值，只有在有显著运动时才更新角度和角速度
             # 计算当前运动方向角
             measured_theta = np.arctan2(vx, vy)
             previous_theta = self.x[9, 0]
@@ -532,16 +526,16 @@ class EnhancedEKF3D:
                 dt = max(0.001, min(0.2, self.last_time - self._last_update_time))
                 estimated_omega = angle_diff / dt
                 
-                # 平滑更新角速度，避免突变
-                alpha = 0.3  # 平滑因子
+                # 更保守的平滑更新角速度，避免突变
+                alpha = 0.1  # 降低平滑因子，更保守
                 self.x[10, 0] = alpha * estimated_omega + (1 - alpha) * self.x[10, 0]
                 
-                # 限制角速度在合理范围内 (±180度/秒)
-                max_omega = np.pi  # 180度/秒
+                # 限制角速度在更小的合理范围内 (±90度/秒)
+                max_omega = np.pi / 2  # 90度/秒
                 self.x[10, 0] = np.clip(self.x[10, 0], -max_omega, max_omega)
             
-            # 平滑更新角度
-            self.x[9, 0] = previous_theta + 0.4 * angle_diff
+            # 更保守的平滑更新角度
+            self.x[9, 0] = previous_theta + 0.2 * angle_diff  # 降低更新幅度
             
             # 将角度限制在 [-π, π] 范围内
             self.x[9, 0] = ((self.x[9, 0] + np.pi) % (2 * np.pi)) - np.pi

@@ -35,14 +35,129 @@ except ImportError:
     tracking_pb2 = None
     tracking_pb2_grpc = None
 
-# ReID 相关导入
-from reid.data.transforms import build_transforms
-from reid.config import cfg as reidCfg
-from reid.modeling import build_model
+# ReID 相关导入 - 使用 FastReID + ONNX
+import onnxruntime
 from utils.plotting import plot_one_box
 
 # 导入扩展卡尔曼滤波器
 from extended_kalman_filter import ExtendedKalmanFilter3D, AdaptiveEKF3D, EnhancedEKF3D
+
+
+# ==============================================================================
+# FastReID 特征提取器
+# ==============================================================================
+class ReIDFeatureExtractor:
+    def __init__(self, model_path="weights/fast-reid_model.onnx"):
+        try:
+            sess_options = onnxruntime.SessionOptions()
+            sess_options.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
+            self.session = onnxruntime.InferenceSession(
+                model_path,
+                sess_options,
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
+            )
+            self.input_name = self.session.get_inputs()[0].name
+            input_shape = self.session.get_inputs()[0].shape
+            self.input_size = (input_shape[3], input_shape[2])
+            print(f"FastReID模型输入形状: {input_shape}, 调整输入尺寸为: {self.input_size}")
+            self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            print("✅ FastReID特征提取器初始化完成，使用ONNX Runtime")
+        except Exception as e:
+            print(f"❌ FastReID模型加载失败: {e}")
+            self.session = None
+            print("🔄 将使用颜色直方图作为替代特征提取方法")
+
+    def extract_features(self, image):
+        if self.session:
+            try:
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                resized = cv2.resize(image_rgb, self.input_size).astype(np.float32)
+                normalized = (resized / 255.0 - self.mean) / self.std
+                input_data = np.transpose(normalized, (2, 0, 1))[np.newaxis, ...]
+
+                if input_data.dtype != np.float32:
+                    input_data = input_data.astype(np.float32)
+
+                features = self.session.run(None, {self.input_name: input_data})[0]
+                norm = np.linalg.norm(features)
+                return features / norm if norm > 0 else features
+            except Exception as e:
+                print(f"❌ FastReID特征提取失败: {e}")
+                return self.fallback_feature_extractor(image)
+        else:
+            return self.fallback_feature_extractor(image)
+
+    def fallback_feature_extractor(self, image):
+        """颜色直方图备用特征提取"""
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1], None, [12, 12], [0, 180, 0, 256])
+        cv2.normalize(hist, hist)
+        return hist.flatten()
+
+
+# ==============================================================================
+# 姿态特征提取与相似度计算
+# ==============================================================================
+def extract_pose_features(keypoints):
+    """提取详细的姿态特征用于匹配"""
+    if keypoints is None or len(keypoints) < 17:
+        return None
+    
+    kpts = keypoints.copy()
+    valid_mask = (kpts[:, 0] > 0) & (kpts[:, 1] > 0)
+    valid_kpts = kpts[valid_mask]
+    
+    if len(valid_kpts) < 5:
+        return None
+    
+    left_shoulder, right_shoulder = 5, 6
+    left_hip, right_hip = 11, 12
+    
+    center_points = []
+    if valid_mask[left_shoulder] and valid_mask[right_shoulder]:
+        center_points.extend([kpts[left_shoulder], kpts[right_shoulder]])
+    if valid_mask[left_hip] and valid_mask[right_hip]:
+        center_points.extend([kpts[left_hip], kpts[right_hip]])
+    
+    center = np.mean(center_points, axis=0) if len(center_points) > 0 else np.mean(valid_kpts, axis=0)
+    
+    distances = np.linalg.norm(valid_kpts - center, axis=1)
+    scale = np.max(distances) if len(distances) > 0 and np.max(distances) > 0 else 1.0
+    
+    features = []
+    for i in range(17):
+        if valid_mask[i]:
+            features.extend(((kpts[i] - center) / scale).tolist())
+        else:
+            features.extend([0.0, 0.0])
+            
+    return np.array(features)
+
+def pose_similarity(feat1, feat2):
+    """计算姿态特征相似度"""
+    if feat1 is None or feat2 is None:
+        return 0.0
+    
+    norm1 = np.linalg.norm(feat1)
+    norm2 = np.linalg.norm(feat2)
+    
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+        
+    cos_sim = np.dot(feat1, feat2) / (norm1 * norm2)
+    return max(0.0, min(1.0, cos_sim))
+
+def calculate_reid_similarity(feature1, feature2):
+    """计算ReID特征相似度"""
+    if feature1 is None or feature2 is None:
+        return 0.0
+    try:
+        similarity = np.dot(feature1.flatten(), feature2.flatten()) / (
+            np.linalg.norm(feature1) * np.linalg.norm(feature2) + 1e-10)
+        return max(0.0, min(1.0, similarity))
+    except:
+        return 0.0
 
 
 # ==============================================================================
@@ -243,7 +358,7 @@ def create_camera_pipeline(rtsp_enabled=True, rtsp_width=1920, rtsp_height=1080,
     # RGB相机配置
     cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
     cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-    cam_rgb.setPreviewSize(640, 400)
+    cam_rgb.setPreviewSize(640, 480)
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
     cam_rgb.setFps(30)
@@ -337,39 +452,6 @@ def detect_all_persons(frame, model, conf_thres=0.5):
         boxes.append(det['box'])
     return boxes
 
-def calculate_body_center_from_keypoints(keypoints, keypoints_conf, bbox):
-    """
-    使用四个关键点计算人体中心：左右肩膀(5,6)和左右髋部(11,12)
-    如果关键点不可用，则回退到边界框中心
-    """
-    # COCO格式关键点索引
-    left_shoulder, right_shoulder = 5, 6
-    left_hip, right_hip = 11, 12
-    
-    # 收集有效的关键点
-    valid_points = []
-    conf_threshold = 0.5
-    
-    if keypoints_conf[left_shoulder] > conf_threshold:
-        valid_points.append(keypoints[left_shoulder])
-    if keypoints_conf[right_shoulder] > conf_threshold:
-        valid_points.append(keypoints[right_shoulder])
-    if keypoints_conf[left_hip] > conf_threshold:
-        valid_points.append(keypoints[left_hip])
-    if keypoints_conf[right_hip] > conf_threshold:
-        valid_points.append(keypoints[right_hip])
-    
-    # 如果有足够的关键点，计算中心
-    if len(valid_points) >= 2:
-        valid_points = np.array(valid_points)
-        center_x = np.mean(valid_points[:, 0])
-        center_y = np.mean(valid_points[:, 1])
-        return (center_x, center_y)
-    else:
-        # 回退到边界框中心
-        xmin, ymin, xmax, ymax = bbox
-        return ((xmin + xmax) / 2, (ymin + ymax) / 2)
-
 def find_center_person(frame, yolo_model):
     """在所有检测到的人中，找到最接近画面中心的一个"""
     detections = detect_all_poses(frame, yolo_model)
@@ -378,11 +460,10 @@ def find_center_person(frame, yolo_model):
     min_dist = float('inf')
     center_detection = None
     for det in detections:
-        # 使用关键点计算人体中心
-        body_center = calculate_body_center_from_keypoints(
-            det['keypoints'], det['keypoints_conf'], det['box']
-        )
-        dist = math.sqrt((body_center[0] - frame_center_x)**2 + (body_center[1] - frame_center_y)**2)
+        xmin, ymin, xmax, ymax = det['box']
+        box_center_x = (xmin + xmax) / 2
+        box_center_y = (ymin + ymax) / 2
+        dist = math.sqrt((box_center_x - frame_center_x)**2 + (box_center_y - frame_center_y)**2)
         if dist < min_dist:
             min_dist = dist
             center_detection = det
@@ -534,7 +615,7 @@ class FrameCaptureThread(threading.Thread):
         self.running = False
 
 class ProcessingThread(threading.Thread):
-    def __init__(self, frame_queue, result_queue, stop_event, start_event, grpc_client, args, yolo_model, reid_model):
+    def __init__(self, frame_queue, result_queue, stop_event, start_event, grpc_client, args, yolo_model):
         super().__init__()
         self.frame_queue = frame_queue
         self.result_queue = result_queue
@@ -544,7 +625,9 @@ class ProcessingThread(threading.Thread):
         self.args = args
         self.device = torch.device(args.device)
         self.yolo_model = yolo_model.to(self.device)
-        self.reid_model = reid_model.to(self.device)
+        
+        # 初始化 FastReID 特征提取器
+        self.reid_extractor = ReIDFeatureExtractor("weights/fast-reid_model.onnx")
         
         # 坐标导出器 (用于ROS2集成)
         self.coord_exporter = CoordinateExporter() if not args.no_ros_export else None
@@ -555,7 +638,7 @@ class ProcessingThread(threading.Thread):
         self.ros_command_active = False
         self.last_ros_command_active = False  # 记录上一次的ROS2命令状态
         
-        # 状态机相关
+        # 跟踪状态相关
         self.state = 'IDLE'
         self.query_feats = None
         self.captured_features = []
@@ -563,6 +646,10 @@ class ProcessingThread(threading.Thread):
         self.last_capture_time = 0
         self.last_grpc_check_time = 0
         self.current_depth_frame = None
+        
+        # 姿态特征相关（集成 track_fastreid.py 的逻辑）
+        self.query_pose_feats = []
+        self.captured_pose_features = []
         
         # 扩展卡尔曼滤波器初始化 - 使用增强版EKF
         print(f"🎯 使用增强版卡尔曼滤波器 (包含角速度的匀加速运动模型)")
@@ -582,6 +669,8 @@ class ProcessingThread(threading.Thread):
         self.last_tracked_kpts = None
         self.last_tracked_kpts_conf = None
         self.last_match_dist = 0.0
+        self.last_reid_dist = 0.0
+        self.last_pose_dist = 0.0
         self.last_coords = None
         self.last_filtered_coords = None  # 滤波后的坐标
         self.last_predicted_coords = None  # 预测的坐标
@@ -593,7 +682,10 @@ class ProcessingThread(threading.Thread):
 
     def run(self):
         if self.grpc_client: self.grpc_client.connect()
-        build_transforms(reidCfg)
+        
+        # 初始化特征存储和历史
+        self.captured_features = []
+        self.query_feats = None
 
         while not self.stop_event.is_set():
             try:
@@ -734,10 +826,19 @@ class ProcessingThread(threading.Thread):
         time_elapsed = time.time() - self.capture_start_time
         if time_elapsed > 3.0:
             if len(self.captured_features) > 0:
-                print(f"特征捕获完成，共 {len(self.captured_features)} 个。正在融合特征...")
-                feats_tensor = torch.cat(self.captured_features, dim=0)
-                avg_feat = torch.mean(feats_tensor, dim=0, keepdim=True)
-                self.query_feats = F.normalize(avg_feat, dim=1, p=2)
+                print(f"特征捕获完成，共 {len(self.captured_features)} 个ReID特征 + {len(self.captured_pose_features)} 个姿态特征。正在融合特征...")
+                # 对于 FastReID 特征，直接计算平均值
+                avg_feat = np.mean(self.captured_features, axis=0)
+                # 归一化
+                norm = np.linalg.norm(avg_feat)
+                self.query_feats = avg_feat / norm if norm > 0 else avg_feat
+                
+                # 融合姿态特征
+                if len(self.captured_pose_features) > 0:
+                    avg_pose_feat = np.mean(self.captured_pose_features, axis=0)
+                    pose_norm = np.linalg.norm(avg_pose_feat)
+                    self.query_pose_feats = avg_pose_feat / pose_norm if pose_norm > 0 else avg_pose_feat
+                
                 self.transition_to_tracking()
             else:
                 print("捕获失败，未采集到任何有效特征。")
@@ -749,14 +850,19 @@ class ProcessingThread(threading.Thread):
                 (xmin, ymin, xmax, ymax) = detection['box']
                 crop_img = frame[ymin:ymax, xmin:xmax]
                 if crop_img.size > 0:
-                    crop_img_pil = Image.fromarray(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
-                    img_tensor = build_transforms(reidCfg)(crop_img_pil).unsqueeze(0).to(self.device)
-                    with torch.no_grad():
-                        feat = self.reid_model(img_tensor)
-                    self.captured_features.append(feat)
+                    # 使用 FastReID 提取特征
+                    feature = self.reid_extractor.extract_features(crop_img)
+                    self.captured_features.append(feature)
+                    
+                    # 提取姿态特征
+                    if 'keypoints' in detection and 'keypoints_conf' in detection:
+                        pose_feature = extract_pose_features(detection['keypoints'])
+                        if pose_feature is not None:
+                            self.captured_pose_features.append(pose_feature)
+                    
                     self.last_capture_time = time.time()
                     self.status_message = f"collecting... ({len(self.captured_features)}/5)"
-                    print(f"已捕获特征 {len(self.captured_features)}/5")
+                    print(f"已捕获特征 {len(self.captured_features)}/5 (ReID) + {len(self.captured_pose_features)} (Pose)")
 
     def process_tracking(self, frame):
         if self.query_feats is None:
@@ -768,14 +874,40 @@ class ProcessingThread(threading.Thread):
         current_time = time.time()
         
         if person_detections:
-            valid_detections, gallery_feats = self.extract_gallery_features(frame, person_detections)
+            valid_detections, gallery_feats, gallery_pose_feats = self.extract_gallery_features(frame, person_detections)
             if gallery_feats is not None:
-                distmat = self.calculate_distance_matrix(gallery_feats)
-                best_g_idx = np.argmin(distmat[0])
-                min_dist = distmat[0, best_g_idx]
+                # 计算 ReID 特征距离
+                reid_distances = self.calculate_distance_matrix(gallery_feats)
+                
+                # 计算姿态特征距离
+                pose_distances = []
+                if len(self.query_pose_feats) > 0 and gallery_pose_feats:
+                    for pose_feat in gallery_pose_feats:
+                        if pose_feat is not None:
+                            pose_sim = pose_similarity(self.query_pose_feats, pose_feat)
+                            pose_distances.append(1.0 - pose_sim)  # 转换为距离
+                        else:
+                            pose_distances.append(1.0)  # 最大距离
+                    pose_distances = np.array(pose_distances)
+                else:
+                    pose_distances = np.ones(len(reid_distances))  # 如果没有姿态特征，给予中性权重
+                
+                # 融合 ReID 和姿态特征（ReID权重0.7，姿态权重0.3）
+                combined_distances = 0.7 * reid_distances + 0.3 * pose_distances
+                
+                best_g_idx = np.argmin(combined_distances)
+                min_dist = combined_distances[best_g_idx]
+                
                 if min_dist < self.args.dist_thres:
                     best_detection = valid_detections[best_g_idx]
-                    best_match_info = {'detection': best_detection, 'dist': min_dist}
+                    reid_dist = reid_distances[best_g_idx]
+                    pose_dist = pose_distances[best_g_idx] if len(pose_distances) > best_g_idx else 1.0
+                    best_match_info = {
+                        'detection': best_detection, 
+                        'dist': min_dist,
+                        'reid_dist': reid_dist,
+                        'pose_dist': pose_dist
+                    }
         
         # 更新状态用于可视化和发送
         if best_match_info:
@@ -784,13 +916,9 @@ class ProcessingThread(threading.Thread):
             self.last_tracked_kpts = best_detection['keypoints']
             self.last_tracked_kpts_conf = best_detection['keypoints_conf']
             self.last_match_dist = best_match_info['dist']
-            
-            # 使用关键点计算人体中心，如果失败则回退到边界框中心
-            center = calculate_body_center_from_keypoints(
-                best_detection['keypoints'], 
-                best_detection['keypoints_conf'], 
-                best_detection['box']
-            )
+            self.last_reid_dist = best_match_info.get('reid_dist', 0.0)
+            self.last_pose_dist = best_match_info.get('pose_dist', 0.0)
+            center = ((self.last_tracked_bbox[0] + self.last_tracked_bbox[2]) / 2, (self.last_tracked_bbox[1] + self.last_tracked_bbox[3]) / 2)
             size = (self.last_tracked_bbox[2] - self.last_tracked_bbox[0], self.last_tracked_bbox[3] - self.last_tracked_bbox[1])
             
             if self.current_depth_frame is not None:
@@ -820,13 +948,13 @@ class ProcessingThread(threading.Thread):
                         angular_velocity = self.ekf.get_current_angular_velocity()
                         orientation = self.ekf.get_current_orientation()
                         uncertainty = self.ekf.get_position_uncertainty()
-                        print(f"原始: [{coords[0]:.2f}, {coords[1]:.2f}, {coords[2]:.2f}] | "
+                        print(f"📍 原始: [{coords[0]:.2f}, {coords[1]:.2f}, {coords[2]:.2f}] | "
                               f"滤波: [{self.last_filtered_coords[0]:.2f}, {self.last_filtered_coords[1]:.2f}, {self.last_filtered_coords[2]:.2f}] | "
                               f"预测: [{self.last_predicted_coords[0]:.2f}, {self.last_predicted_coords[1]:.2f}, {self.last_predicted_coords[2]:.2f}]")
-                        # print(f"     速度: [{velocity[0]:.2f}, {velocity[1]:.2f}, {velocity[2]:.2f}] | "
-                        #       f"加速度: [{acceleration[0]:.2f}, {acceleration[1]:.2f}, {acceleration[2]:.2f}] | "
-                        #       f"角速度: {angular_velocity:.3f} rad/s | 方向: {np.rad2deg(orientation):.1f}° | "
-                        #       f"不确定性: {uncertainty:.3f}")
+                        print(f"     速度: [{velocity[0]:.2f}, {velocity[1]:.2f}, {velocity[2]:.2f}] | "
+                              f"加速度: [{acceleration[0]:.2f}, {acceleration[1]:.2f}, {acceleration[2]:.2f}] | "
+                              f"角速度: {angular_velocity:.3f} rad/s | 方向: {np.rad2deg(orientation):.1f}° | "
+                              f"不确定性: {uncertainty:.3f}")
                 else:
                     self.last_coords = None
                     # 处理目标丢失情况
@@ -885,6 +1013,8 @@ class ProcessingThread(threading.Thread):
         self.state = 'IDLE'
         self.query_feats = None
         self.captured_features = []
+        self.query_pose_feats = []
+        self.captured_pose_features = []
         # 重置卡尔曼滤波器
         self.ekf.reset()
         self.last_filtered_coords = None
@@ -905,6 +1035,10 @@ class ProcessingThread(threading.Thread):
         elif self.state == 'TRACKING' and self.last_tracked_bbox:
             label = f"Target | Dist: {self.last_match_dist:.2f}"
             
+            # 显示ReID和姿态匹配距离
+            if hasattr(self, 'last_reid_dist') and hasattr(self, 'last_pose_dist'):
+                label += f" | ReID: {self.last_reid_dist:.2f} | Pose: {self.last_pose_dist:.2f}"
+            
             # 显示原始坐标
             if self.last_coords:
                 label += f' | Raw: {self.last_coords[0]:.1f}, {self.last_coords[1]:.1f}, {self.last_coords[2]:.1f}m'
@@ -921,102 +1055,6 @@ class ProcessingThread(threading.Thread):
             # 绘制跟踪目标的骨架
             if self.last_tracked_kpts is not None and self.last_tracked_kpts_conf is not None:
                 draw_skeleton(vis_frame, self.last_tracked_kpts, self.last_tracked_kpts_conf)
-            
-            # 绘制中心点：原始检测中心点和滤波后的中心点
-            if self.last_tracked_bbox and self.last_tracked_kpts is not None and self.last_tracked_kpts_conf is not None:
-                # 使用关键点计算的人体中心点 (红色圆点)
-                body_center = calculate_body_center_from_keypoints(
-                    self.last_tracked_kpts, self.last_tracked_kpts_conf, self.last_tracked_bbox
-                )
-                raw_center_x = int(body_center[0])
-                raw_center_y = int(body_center[1])
-                cv2.circle(vis_frame, (raw_center_x, raw_center_y), 8, (0, 0, 255), -1)  # 红色实心圆
-                cv2.circle(vis_frame, (raw_center_x, raw_center_y), 12, (0, 0, 255), 2)  # 红色圆环
-                cv2.putText(vis_frame, "Raw", (raw_center_x + 15, raw_center_y - 5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            elif self.last_tracked_bbox:
-                # 如果关键点不可用，使用边界框中心 (红色圆点)
-                raw_center_x = int((self.last_tracked_bbox[0] + self.last_tracked_bbox[2]) / 2)
-                raw_center_y = int((self.last_tracked_bbox[1] + self.last_tracked_bbox[3]) / 2)
-                cv2.circle(vis_frame, (raw_center_x, raw_center_y), 8, (0, 0, 255), -1)  # 红色实心圆
-                cv2.circle(vis_frame, (raw_center_x, raw_center_y), 12, (0, 0, 255), 2)  # 红色圆环
-                cv2.putText(vis_frame, "Raw (BBox)", (raw_center_x + 15, raw_center_y - 5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            
-            # 如果有滤波后的坐标，可以尝试将3D坐标投影回2D来显示（简化处理）
-            # 这里我们使用一个简化的方法：假设滤波后的坐标相对于原始坐标的偏移
-            if (self.last_coords and self.last_filtered_coords and 
-                self.last_tracked_bbox and self.last_tracked_kpts is not None and self.last_tracked_kpts_conf is not None):
-                # 计算3D空间中的偏移
-                dx_3d = self.last_filtered_coords[0] - self.last_coords[0]  # X方向偏移
-                dy_3d = self.last_filtered_coords[1] - self.last_coords[1]  # Y方向偏移
-                
-                # 简化的2D投影（使用相机参数的近似值）
-                fx, fy = 860.0, 860.0
-                if self.current_depth_frame is not None:
-                    depth = self.last_coords[0] if self.last_coords[0] > 0 else 1.0  # 使用X坐标作为深度的近似
-                    # 将3D偏移转换为像素偏移
-                    pixel_offset_x = int(-dy_3d * fx / depth)  # 注意坐标系转换
-                    pixel_offset_y = int(-dx_3d * fy / depth)  # Y轴取负号
-                    
-                    # 获取原始中心点坐标
-                    body_center = calculate_body_center_from_keypoints(
-                        self.last_tracked_kpts, self.last_tracked_kpts_conf, self.last_tracked_bbox
-                    )
-                    raw_center_x = int(body_center[0])
-                    raw_center_y = int(body_center[1])
-                    
-                    # 计算滤波后的中心点在图像中的位置
-                    filtered_center_x = raw_center_x + pixel_offset_x
-                    filtered_center_y = raw_center_y + pixel_offset_y
-                    
-                    # 确保坐标在图像范围内
-                    filtered_center_x = max(0, min(vis_frame.shape[1] - 1, filtered_center_x))
-                    filtered_center_y = max(0, min(vis_frame.shape[0] - 1, filtered_center_y))
-                    
-                    # 绘制滤波后的中心点 (绿色圆点)
-                    cv2.circle(vis_frame, (filtered_center_x, filtered_center_y), 8, (0, 255, 0), -1)  # 绿色实心圆
-                    cv2.circle(vis_frame, (filtered_center_x, filtered_center_y), 12, (0, 255, 0), 2)  # 绿色圆环
-                    cv2.putText(vis_frame, "Filtered", (filtered_center_x + 15, filtered_center_y - 5), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                    
-                    # 绘制连接线显示滤波效果
-                    cv2.line(vis_frame, (raw_center_x, raw_center_y), 
-                            (filtered_center_x, filtered_center_y), (255, 255, 0), 2)
-            
-            # 如果有预测坐标，也可以类似地显示预测中心点
-            if (self.last_coords and self.last_predicted_coords and 
-                self.last_tracked_bbox and self.last_tracked_kpts is not None and self.last_tracked_kpts_conf is not None):
-                # 计算3D空间中的预测偏移
-                dx_pred = self.last_predicted_coords[0] - self.last_coords[0]
-                dy_pred = self.last_predicted_coords[1] - self.last_coords[1]
-                
-                # 简化的2D投影
-                fx, fy = 860.0, 860.0
-                if self.current_depth_frame is not None:
-                    depth = self.last_coords[0] if self.last_coords[0] > 0 else 1.0
-                    pixel_offset_x = int(-dy_pred * fx / depth)
-                    pixel_offset_y = int(-dx_pred * fy / depth)
-                    
-                    # 获取原始中心点坐标
-                    body_center = calculate_body_center_from_keypoints(
-                        self.last_tracked_kpts, self.last_tracked_kpts_conf, self.last_tracked_bbox
-                    )
-                    raw_center_x = int(body_center[0])
-                    raw_center_y = int(body_center[1])
-                    
-                    pred_center_x = raw_center_x + pixel_offset_x
-                    pred_center_y = raw_center_y + pixel_offset_y
-                    
-                    # 确保坐标在图像范围内
-                    pred_center_x = max(0, min(vis_frame.shape[1] - 1, pred_center_x))
-                    pred_center_y = max(0, min(vis_frame.shape[0] - 1, pred_center_y))
-                    
-                    # 绘制预测中心点 (蓝色圆点)
-                    cv2.circle(vis_frame, (pred_center_x, pred_center_y), 6, (255, 0, 0), -1)  # 蓝色实心圆
-                    cv2.circle(vis_frame, (pred_center_x, pred_center_y), 10, (255, 0, 0), 2)  # 蓝色圆环
-                    cv2.putText(vis_frame, "Pred", (pred_center_x + 15, pred_center_y + 15), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
         
         # 绘制固定的UI元素
         self.frame_count += 1
@@ -1027,21 +1065,7 @@ class ProcessingThread(threading.Thread):
         
         cv2.putText(vis_frame, f"FPS: {self.fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(vis_frame, self.status_message, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        
-        # 添加中心点图例（仅在跟踪状态时显示）
-        if self.state == 'TRACKING':
-            legend_y = vis_frame.shape[0] - 60  # 从底部开始
-            # 原始中心点图例
-            cv2.circle(vis_frame, (20, legend_y), 6, (0, 0, 255), -1)
-            cv2.putText(vis_frame, "Raw Center", (35, legend_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            
-            # 滤波后中心点图例
-            cv2.circle(vis_frame, (150, legend_y), 6, (0, 255, 0), -1)
-            cv2.putText(vis_frame, "Filtered Center", (165, legend_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            
-            # 预测中心点图例
-            cv2.circle(vis_frame, (300, legend_y), 6, (255, 0, 0), -1)
-            cv2.putText(vis_frame, "Predicted Center", (315, legend_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+        cv2.putText(vis_frame, "FastReID + Pose Tracking", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
         # 显示卡尔曼滤波器状态
         if self.ekf.is_initialized():
@@ -1052,47 +1076,60 @@ class ProcessingThread(threading.Thread):
             orientation = self.ekf.get_current_orientation()
             ekf_status = f"Enhanced EKF: Init | Unc: {uncertainty:.3f} | Vel: [{velocity[0]:.2f}, {velocity[1]:.2f}, {velocity[2]:.2f}]"
             accel_status = f"Acc: [{acceleration[0]:.2f}, {acceleration[1]:.2f}, {acceleration[2]:.2f}] | ω: {angular_velocity:.3f} rad/s | θ: {np.rad2deg(orientation):.1f}°"
-            cv2.putText(vis_frame, ekf_status, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            cv2.putText(vis_frame, accel_status, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            cv2.putText(vis_frame, ekf_status, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            cv2.putText(vis_frame, accel_status, (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         else:
-            cv2.putText(vis_frame, "Enhanced EKF: Not Initialized", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
+            cv2.putText(vis_frame, "Enhanced EKF: Not Initialized", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
             
         return vis_frame
 
     def extract_gallery_features(self, frame, person_detections):
         valid_detections = []
-        gallery_img_tensors = []
+        gallery_feats = []
+        gallery_pose_feats = []
+        
         for det in person_detections:
             xmin, ymin, xmax, ymax = det['box']
             crop_img = frame[ymin:ymax, xmin:xmax]
             if crop_img.size > 0:
                 valid_detections.append(det)
-                crop_img_pil = Image.fromarray(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
-                gallery_img_tensors.append(build_transforms(reidCfg)(crop_img_pil).unsqueeze(0))
+                # 使用 FastReID 提取特征
+                feature = self.reid_extractor.extract_features(crop_img)
+                gallery_feats.append(feature)
+                
+                # 提取姿态特征
+                pose_feature = None
+                if 'keypoints' in det and 'keypoints_conf' in det:
+                    pose_feature = extract_pose_features(det['keypoints'])
+                gallery_pose_feats.append(pose_feature)
         
-        if not gallery_img_tensors: 
-            return None, None
+        if not gallery_feats: 
+            return None, None, None
             
-        gallery_img = torch.cat(gallery_img_tensors, dim=0).to(self.device)
-        with torch.no_grad():
-            gallery_feats = self.reid_model(gallery_img)
-            gallery_feats = F.normalize(gallery_feats, dim=1, p=2)
-            
-        return valid_detections, gallery_feats
+        # 转换为 numpy 数组
+        gallery_feats = np.array(gallery_feats)
+        return valid_detections, gallery_feats, gallery_pose_feats
 
     def calculate_distance_matrix(self, gallery_feats):
-        m, n = self.query_feats.shape[0], gallery_feats.shape[0]
-        distmat = torch.pow(self.query_feats, 2).sum(dim=1, keepdim=True).expand(m, n) + \
-                  torch.pow(gallery_feats, 2).sum(dim=1, keepdim=True).expand(n, m).t()
-        distmat.addmm_(self.query_feats, gallery_feats.t(), beta=1, alpha=-2)
-        return distmat.cpu().numpy()
+        """计算查询特征与候选特征的距离矩阵"""
+        if self.query_feats is None or len(gallery_feats) == 0:
+            return np.array([])
+        
+        distances = []
+        for gallery_feat in gallery_feats:
+            # 计算特征相似度，转换为距离（1 - 相似度）
+            similarity = calculate_reid_similarity(self.query_feats, gallery_feat)
+            distance = 1.0 - similarity
+            distances.append(distance)
+        
+        return np.array(distances)
 
 
 # ==============================================================================
 # 主程序
 # ==============================================================================
 def main(args):
-    print("=== OAK ReID 自动指令跟踪系统 (支持RTSP) ===")
+    print("=== OAK FastReID + 姿态 自动指令跟踪系统 (支持RTSP) ===")
     
     # 创建相机管理器，支持RTSP配置
     camera_manager = CameraManager(
@@ -1107,10 +1144,8 @@ def main(args):
     try:
         print("正在加载模型...")
         yolo_model = YOLO(args.model_path)
-        reid_model = build_model(reidCfg, num_classes=1501)
-        reid_model.load_param(reidCfg.TEST.WEIGHT)
-        reid_model.eval()
-        print("✓ 模型加载完成")
+        print("✓ YOLO模型加载完成")
+        print("✓ FastReID特征提取器将在处理线程中初始化")
     except Exception as e:
         print(f"❌ 模型加载失败: {e}")
         camera_manager.close()
@@ -1124,7 +1159,7 @@ def main(args):
     grpc_client = TrackingGRPCClient(args.grpc_server) if not args.no_grpc else None
 
     capture_thread = FrameCaptureThread(camera_manager.get_device(), frame_queue)
-    processing_thread = ProcessingThread(frame_queue, result_queue, stop_event, start_event, grpc_client, args, yolo_model, reid_model)
+    processing_thread = ProcessingThread(frame_queue, result_queue, stop_event, start_event, grpc_client, args, yolo_model)
 
     # 创建RTSP流线程
     rtsp_thread = None
@@ -1182,7 +1217,7 @@ def main(args):
 def parse_args():
     parser = argparse.ArgumentParser(description='OAK ReID Auto Tracking with gRPC and RTSP')
     parser.add_argument('--model-path', type=str, default='models/yolo11n-pose.pt', help='YOLOv11-Pose模型路径')
-    parser.add_argument('--dist-thres', type=float, default=1.1, help='ReID距离阈值')
+    parser.add_argument('--dist-thres', type=float, default=0.5, help='ReID距离阈值')
     parser.add_argument('--conf-thres', type=float, default=0.5, help='YOLO检测置信度阈值')
     parser.add_argument('--device', type=str, default=None, help='计算设备 (e.g., cpu, cuda:0)')
     parser.add_argument('--grpc-server', default='localhost:50051', help='gRPC服务器地址')
@@ -1199,11 +1234,11 @@ def parse_args():
     parser.add_argument('--no-rtsp', action='store_true', help='禁用RTSP流推送')
     
     # 卡尔曼滤波器参数
-    parser.add_argument('--ekf-process-noise', type=float, default=0.5, help='卡尔曼滤波器过程噪声标准差')
+    parser.add_argument('--ekf-process-noise', type=float, default=1.0, help='卡尔曼滤波器过程噪声标准差')
     parser.add_argument('--ekf-measurement-noise', type=float, default=10.0, help='卡尔曼滤波器测量噪声标准差')
     parser.add_argument('--ekf-velocity-std', type=float, default=0.1, help='卡尔曼滤波器初始速度不确定性标准差')
-    parser.add_argument('--ekf-acceleration-std', type=float, default=0.1, help='卡尔曼滤波器初始加速度不确定性标准差')
-    parser.add_argument('--ekf-angular-velocity-std', type=float, default=0.1, help='卡尔曼滤波器初始角速度不确定性标准差')
+    parser.add_argument('--ekf-acceleration-std', type=float, default=0.5, help='卡尔曼滤波器初始加速度不确定性标准差')
+    parser.add_argument('--ekf-angular-velocity-std', type=float, default=0.4, help='卡尔曼滤波器初始角速度不确定性标准差')
     parser.add_argument('--use-adaptive-ekf', action='store_true', help='使用卡尔曼滤波器')
     
     return parser.parse_args()
@@ -1213,7 +1248,8 @@ if __name__ == '__main__':
     if args.device is None:
         args.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     print(f"使用的计算设备: {args.device}")
-    
+    print("🎯 集成特征: FastReID + 姿态特征")
+    print("📊 匹配权重: ReID(70%) + 姿态(30%)")
 
 
     # 显示卡尔曼滤波器配置信息
