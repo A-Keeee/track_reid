@@ -462,6 +462,12 @@ class ProcessingThread(threading.Thread):
         self.frame_count = 0
         self.start_time = time.time()
         self.enable_visualization = not args.no_viz
+        
+        # 延迟监控
+        self.processing_fps = 0
+        self.processing_frame_count = 0
+        self.processing_start_time = time.time()
+        self.dropped_frames_count = 0
 
     def run(self):
         if self.grpc_client: self.grpc_client.connect()
@@ -469,8 +475,40 @@ class ProcessingThread(threading.Thread):
 
         while not self.stop_event.is_set():
             try:
-                frame, depth_frame = self.frame_queue.get(timeout=1)
+                # 获取最新的帧，丢弃队列中的所有旧帧
+                frame, depth_frame = None, None
+                frame_count = 0
+                
+                # 清空队列，只保留最新的帧
+                while True:
+                    try:
+                        frame, depth_frame = self.frame_queue.get_nowait()
+                        frame_count += 1
+                    except queue.Empty:
+                        break
+                
+                # 如果没有获取到任何帧，使用阻塞等待
+                if frame is None:
+                    try:
+                        frame, depth_frame = self.frame_queue.get(timeout=0.1)
+                        frame_count = 1
+                    except queue.Empty:
+                        continue
+                
+                # 记录丢弃的帧数量（用于调试）
+                if frame_count > 1:
+                    self.dropped_frames_count += (frame_count - 1)
+                    print(f"🚀 处理最新帧，丢弃了 {frame_count-1} 个旧帧 (总计丢弃: {self.dropped_frames_count})")
+                
                 self.current_depth_frame = depth_frame
+                
+                # 更新处理帧率统计
+                self.processing_frame_count += 1
+                if time.time() - self.processing_start_time > 5:  # 每5秒计算一次处理帧率
+                    self.processing_fps = self.processing_frame_count / (time.time() - self.processing_start_time)
+                    print(f"📊 处理帧率: {self.processing_fps:.1f} FPS, 累积丢弃帧: {self.dropped_frames_count}")
+                    self.processing_start_time = time.time()
+                    self.processing_frame_count = 0
             except queue.Empty:
                 continue
             
@@ -480,8 +518,12 @@ class ProcessingThread(threading.Thread):
             # 2. 如果启用，创建并发送可视化帧
             if self.enable_visualization:
                 vis_frame = self.create_visualization(frame)
-                if self.result_queue.full():
-                    self.result_queue.get_nowait()
+                # 清空可视化队列，只保留最新的帧
+                while not self.result_queue.empty():
+                    try:
+                        self.result_queue.get_nowait()
+                    except queue.Empty:
+                        break
                 self.result_queue.put(vis_frame)
 
         if self.grpc_client: self.grpc_client.disconnect()
@@ -831,22 +873,24 @@ class ProcessingThread(threading.Thread):
             self.frame_count = 0
         
         cv2.putText(vis_frame, f"FPS: {self.fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(vis_frame, self.status_message, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        # cv2.putText(vis_frame, f"Processing FPS: {self.processing_fps:.1f}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        # cv2.putText(vis_frame, self.status_message, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        # cv2.putText(vis_frame, f"Dropped Frames: {self.dropped_frames_count}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 100, 100), 1)
         
         # 显示卡尔曼滤波器状态
         if self.ekf.is_initialized():
             uncertainty = self.ekf.get_position_uncertainty()
             velocity = self.ekf.get_current_velocity()
             ekf_status = f"Enhanced EKF: Init | Unc: {uncertainty:.3f} | Vel: [{velocity[0]:.2f}, {velocity[1]:.2f}, {velocity[2]:.2f}]"
-            cv2.putText(vis_frame, ekf_status, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            cv2.putText(vis_frame, ekf_status, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         else:
-            cv2.putText(vis_frame, "Enhanced EKF: Not Initialized", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
+            cv2.putText(vis_frame, "Enhanced EKF: Not Initialized", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
         
         # 显示关键点信息
         if self.state == 'TRACKING' and self.last_tracked_kpts is not None:
             valid_kpts = sum(1 for conf in self.last_tracked_kpts_conf if conf > 0.5)
             kpt_info = f"Keypoints: {valid_kpts}/17"
-            cv2.putText(vis_frame, kpt_info, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(vis_frame, kpt_info, (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
         return vis_frame
 
@@ -883,8 +927,8 @@ class ImageSubscriberNode(Node):
         self.get_logger().info("=== ReID ROS2 跟踪节点启动 ===")
         
         self.bridge = CvBridge()
-        self.frame_queue = queue.Queue(maxsize=5)
-        self.result_queue = queue.Queue(maxsize=5) if not args.no_viz else None
+        self.frame_queue = queue.Queue(maxsize=2)  # 减小队列大小，避免积累过多帧
+        self.result_queue = queue.Queue(maxsize=2) if not args.no_viz else None  # 减小可视化队列
         self.stop_event = threading.Event()
         self.start_event = threading.Event()
         
@@ -935,10 +979,25 @@ class ImageSubscriberNode(Node):
             self.get_logger().error(f"CvBridge转换错误: {e}")
             return
         
-        # 将帧放入队列供处理线程使用
-        if self.frame_queue.full():
-            self.frame_queue.get_nowait() # 如果队列满了，丢弃旧的帧
-        self.frame_queue.put((color_frame, depth_frame))
+        # 确保队列中只保留最新的帧，清空所有旧帧
+        while not self.frame_queue.empty():
+            try:
+                self.frame_queue.get_nowait()
+            except queue.Empty:
+                break
+        
+        # 将最新帧放入队列
+        try:
+            self.frame_queue.put_nowait((color_frame, depth_frame))
+        except queue.Full:
+            # 如果队列仍然满，强制清空并重新放入
+            self.get_logger().warn("队列仍然满，强制清空旧帧")
+            while not self.frame_queue.empty():
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+            self.frame_queue.put_nowait((color_frame, depth_frame))
 
     def stop_all_threads(self):
         self.get_logger().info("正在停止所有线程...")
@@ -964,8 +1023,16 @@ def main(args):
         while rclpy.ok():
             rclpy.spin_once(reid_node, timeout_sec=0.01)
             try:
-                display_frame = reid_node.result_queue.get_nowait()
-                cv2.imshow(window_name, display_frame)
+                # 获取最新的可视化帧，丢弃旧帧
+                display_frame = None
+                while True:
+                    try:
+                        display_frame = reid_node.result_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                
+                if display_frame is not None:
+                    cv2.imshow(window_name, display_frame)
             except queue.Empty:
                 pass
 
