@@ -4,10 +4,10 @@ gnome-terminal -- bash -i -c "source install/setup.bash && ros2 launch odin_ros_
 
 sleep 5
 
-cd ~/track_torch
+cd ~/track_odin
 
-gnome-terminal -- bash -i -c "conda deactivate && python3 track_torch_ros2/simple_pose_publisher.py; exec bash"
-gnome-terminal -- bash -i -c "conda deactivate && python3 track_torch_ros2/vision_control_subscriber.py; exec bash"
+gnome-terminal -- bash -i -c "conda deactivate && python3 track_odin/simple_pose_publisher.py; exec bash"
+gnome-terminal -- bash -i -c "conda deactivate && python3 track_odin/vision_control_subscriber.py; exec bash"
 
 
 source ~/anaconda3/etc/profile.d/conda.sh
