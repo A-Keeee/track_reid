@@ -1,7 +1,12 @@
 # REID+姿态+前10s无重复特征+gRPC通信
 # 
 # 性能优化版本 - 单目标跟踪系统
-# 
+
+ 
+ 
+# （reid+pose）重识别+grpc 
+
+  
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -1034,14 +1039,14 @@ class MultiTargetManager:
                     
                     # ReID特征相似度 (权重0.7)
                     reid_sim = target.compare_signature(frame, (x1, y1, x2, y2))
-                    match_score += 0.7 * reid_sim
+                    match_score += 0.6 * reid_sim
                     
                     # 姿态相似度 (权重0.2)
                     pose_sim = 0.0
                     if keypoints_data is not None and i < len(keypoints_data):
                         keypoints = keypoints_data[i]
                         pose_sim = target.compare_pose(keypoints)
-                    match_score += 0.2 * pose_sim
+                    match_score += 0.3 * pose_sim
 
                     # 位置距离 (权重0.1)
                     if target.position:

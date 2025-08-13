@@ -51,6 +51,102 @@ from reid.config import cfg as reidCfg
 from reid.modeling import build_model
 from utils.plotting import plot_one_box
 
+# 导入扩展卡尔曼滤波器
+from extended_kalman_filter import ExtendedKalmanFilter3D, AdaptiveEKF3D, EnhancedEKF3D
+
+
+# ==============================================================================
+# 姿态可视化相关
+# ==============================================================================
+
+# COCO 格式的人体骨架连接 (17个关键点)
+SKELETON_CONNECTIONS = [
+    # 头部
+    (0, 1), (0, 2), (1, 3), (2, 4),  # 鼻子-眼睛-耳朵
+    # 身体中轴线
+    (5, 6), (5, 11), (6, 12), (11, 12),  # 肩膀-髋部
+    # 左臂
+    (5, 7), (7, 9),  # 左肩-左肘-左腕
+    # 右臂
+    (6, 8), (8, 10),  # 右肩-右肘-右腕
+    # 左腿
+    (11, 13), (13, 15),  # 左髋-左膝-左踝
+    # 右腿
+    (12, 14), (14, 16)   # 右髋-右膝-右踝
+]
+
+# 关键点颜色 (BGR格式)
+KEYPOINT_COLORS = [
+    (255, 0, 0),    # 0: 鼻子 - 红色
+    (255, 85, 0),   # 1: 左眼 - 橙红色
+    (255, 170, 0),  # 2: 右眼 - 橙色
+    (255, 255, 0),  # 3: 左耳 - 黄色
+    (170, 255, 0),  # 4: 右耳 - 黄绿色
+    (85, 255, 0),   # 5: 左肩 - 绿色
+    (0, 255, 0),    # 6: 右肩 - 纯绿色
+    (0, 255, 85),   # 7: 左肘 - 青绿色
+    (0, 255, 170),  # 8: 右肘 - 青色
+    (0, 255, 255),  # 9: 左腕 - 青蓝色
+    (0, 170, 255),  # 10: 右腕 - 蓝色
+    (0, 85, 255),   # 11: 左髋 - 蓝紫色
+    (0, 0, 255),    # 12: 右髋 - 紫色
+    (85, 0, 255),   # 13: 左膝 - 紫红色
+    (170, 0, 255),  # 14: 右膝 - 粉色
+    (255, 0, 255),  # 15: 左踝 - 品红色
+    (255, 0, 170)   # 16: 右踝 - 玫红色
+]
+
+def draw_keypoints(image, keypoints, keypoints_conf, conf_threshold=0.1):
+    """绘制关键点"""
+    for i, (kpt, conf) in enumerate(zip(keypoints, keypoints_conf)):
+        if conf > conf_threshold:
+            x, y = int(kpt[0]), int(kpt[1])
+            color = KEYPOINT_COLORS[i] if i < len(KEYPOINT_COLORS) else (255, 255, 255)
+            cv2.circle(image, (x, y), 4, color, -1)
+            cv2.circle(image, (x, y), 6, (0, 0, 0), 2)  # 黑色边框
+
+def draw_skeleton(image, keypoints, keypoints_conf, conf_threshold=0.1):
+    """绘制骨架连接"""
+    for connection in SKELETON_CONNECTIONS:
+        pt1_idx, pt2_idx = connection
+        if (pt1_idx < len(keypoints_conf) and pt2_idx < len(keypoints_conf) and
+            keypoints_conf[pt1_idx] > conf_threshold and keypoints_conf[pt2_idx] > conf_threshold):
+            
+            pt1 = (int(keypoints[pt1_idx][0]), int(keypoints[pt1_idx][1]))
+            pt2 = (int(keypoints[pt2_idx][0]), int(keypoints[pt2_idx][1]))
+            
+            # 根据连接部位选择颜色
+            if connection in [(5, 6), (5, 11), (6, 12), (11, 12)]:  # 躯干
+                color = (0, 255, 0)  # 绿色
+            elif connection in [(5, 7), (7, 9)]:  # 左臂
+                color = (255, 0, 0)  # 蓝色
+            elif connection in [(6, 8), (8, 10)]:  # 右臂
+                color = (0, 0, 255)  # 红色
+            elif connection in [(11, 13), (13, 15)]:  # 左腿
+                color = (255, 255, 0)  # 青色
+            elif connection in [(12, 14), (14, 16)]:  # 右腿
+                color = (0, 255, 255)  # 黄色
+            else:  # 头部
+                color = (255, 0, 255)  # 品红色
+            
+            cv2.line(image, pt1, pt2, color, 2)
+
+def draw_pose_on_person(image, detection, label_prefix="", label_color=(0, 255, 0)):
+    """在检测到的人物上绘制姿态骨架和边界框"""
+    # 绘制边界框
+    plot_one_box(detection['box'], image, label=label_prefix, color=label_color)
+    
+    # 绘制骨架和关键点
+    draw_skeleton(image, detection['keypoints'], detection['keypoints_conf'])
+    draw_keypoints(image, detection['keypoints'], detection['keypoints_conf'])
+    
+    # 绘制人体中心点
+    body_center = calculate_body_center_from_keypoints(
+        detection['keypoints'], detection['keypoints_conf'], detection['box']
+    )
+    center_x, center_y = int(body_center[0]), int(body_center[1])
+    cv2.circle(image, (center_x, center_y), 8, (0, 255, 255), -1)  # 黄色圆点
+    cv2.circle(image, (center_x, center_y), 10, (0, 0, 0), 2)     # 黑色边框
 
 # ==============================================================================
 # 坐标导出器 (用于ROS2集成)
@@ -224,31 +320,89 @@ def calculate_3d_coordinates(depth_map, center_point, size=None):
     
     return (X_world, Y_world, Z_world)
 
-def detect_all_persons(frame, model, conf_thres=0.5):
+def detect_all_poses(frame, model, conf_thres=0.5):
+    """检测所有人的姿态，返回包含边界框和关键点的检测结果"""
     results = model.predict(source=frame, show=False, classes=[0], conf=conf_thres, verbose=False)
-    boxes = []
-    if len(results[0].boxes) > 0:
-        for box in results[0].boxes:
+    detections = []
+    if len(results[0].boxes) > 0 and results[0].keypoints is not None:
+        for i in range(len(results[0].boxes)):
+            box = results[0].boxes[i]
             if box.conf[0] > conf_thres:
                 xmin, ymin, xmax, ymax = map(int, box.xyxy[0].cpu().numpy())
                 if (xmax - xmin) * (ymax - ymin) > 2000:
-                    boxes.append((xmin, ymin, xmax, ymax))
+                    keypoints = results[0].keypoints[i].xy.cpu().numpy()[0]
+                    keypoints_conf = results[0].keypoints[i].conf.cpu().numpy()[0]
+                    detections.append({
+                        'box': (xmin, ymin, xmax, ymax),
+                        'keypoints': keypoints,
+                        'keypoints_conf': keypoints_conf
+                    })
+    return detections
+
+def calculate_body_center_from_keypoints(keypoints, keypoints_conf, bbox):
+    """
+    使用四个关键点计算人体中心：左右肩膀(5,6)和左右髋部(11,12)
+    如果关键点不可用，则回退到边界框中心
+    """
+    # COCO格式关键点索引
+    left_shoulder, right_shoulder = 5, 6
+    left_hip, right_hip = 11, 12
+    
+    # 收集有效的关键点
+    valid_points = []
+    conf_threshold = 0.01
+    
+    if keypoints_conf[left_shoulder] > conf_threshold:
+        valid_points.append(keypoints[left_shoulder])
+    if keypoints_conf[right_shoulder] > conf_threshold:
+        valid_points.append(keypoints[right_shoulder])
+    if keypoints_conf[left_hip] > conf_threshold:
+        valid_points.append(keypoints[left_hip])
+    if keypoints_conf[right_hip] > conf_threshold:
+        valid_points.append(keypoints[right_hip])
+    
+    # 如果有足够的关键点，计算中心
+    if len(valid_points) >= 2:
+        valid_points = np.array(valid_points)
+        center_x = np.mean(valid_points[:, 0])
+        center_y = np.mean(valid_points[:, 1])
+        return (center_x, center_y)
+    else:
+        # 回退到边界框中心
+        xmin, ymin, xmax, ymax = bbox
+        return ((xmin + xmax) / 2, (ymin + ymax) / 2)
+
+def detect_all_persons(frame, model, conf_thres=0.5):
+    """兼容函数：从pose检测中提取边界框"""
+    pose_detections = detect_all_poses(frame, model, conf_thres)
+    boxes = []
+    for det in pose_detections:
+        boxes.append(det['box'])
     return boxes
 
 def find_center_person(frame, yolo_model):
-    boxes = detect_all_persons(frame, yolo_model)
-    if not boxes: return None
+    """在所有检测到的人中，找到最接近画面中心的一个，返回姿态检测结果"""
+    detections = detect_all_poses(frame, yolo_model)
+    if not detections: return None
+    
     frame_center_x, frame_center_y = frame.shape[1] / 2, frame.shape[0] / 2
     min_dist = float('inf')
-    center_box = None
-    for (xmin, ymin, xmax, ymax) in boxes:
-        box_center_x = (xmin + xmax) / 2
-        box_center_y = (ymin + ymax) / 2
-        dist = math.sqrt((box_center_x - frame_center_x)**2 + (box_center_y - frame_center_y)**2)
+    center_detection = None
+    
+    for det in detections:
+        # 使用关键点计算人体中心
+        body_center = calculate_body_center_from_keypoints(
+            det['keypoints'], det['keypoints_conf'], det['box']
+        )
+        
+        # 计算到画面中心的距离
+        dist = math.sqrt((body_center[0] - frame_center_x)**2 + 
+                        (body_center[1] - frame_center_y)**2)
         if dist < min_dist:
             min_dist = dist
-            center_box = (xmin, ymin, xmax, ymax)
-    return center_box
+            center_detection = det
+    
+    return center_detection
 
 
 # ==============================================================================
@@ -285,10 +439,24 @@ class ProcessingThread(threading.Thread):
         self.last_grpc_check_time = 0
         self.current_depth_frame = None
         
+        # 扩展卡尔曼滤波器初始化 - 使用增强版EKF
+        print(f"🎯 使用增强版卡尔曼滤波器 (包含角速度的匀加速运动模型)")
+        self.ekf = EnhancedEKF3D(
+            process_noise_std=getattr(args, 'ekf_process_noise', 2.0),
+            measurement_noise_std=getattr(args, 'ekf_measurement_noise', 8.0),
+            initial_velocity_std=getattr(args, 'ekf_velocity_std', 0.5),
+            initial_acceleration_std=getattr(args, 'ekf_acceleration_std', 0.3),
+            initial_angular_velocity_std=getattr(args, 'ekf_angular_velocity_std', 0.2)
+        )
+        
         # 可视化相关
         self.last_tracked_bbox = None
+        self.last_tracked_kpts = None
+        self.last_tracked_kpts_conf = None
         self.last_match_dist = 0.0
         self.last_coords = None
+        self.last_filtered_coords = None  # 滤波后的坐标
+        self.last_predicted_coords = None  # 预测的坐标
         self.status_message = "状态: 待机 (等待指令...)"
         self.fps = 0
         self.frame_count = 0
@@ -332,7 +500,7 @@ class ProcessingThread(threading.Thread):
         elif self.state == 'TRACKING':
             self.process_tracking(frame)
             # 检查gRPC停止信号 (保持原有逻辑不变)
-            if self.grpc_client and (time.time() - self.last_grpc_check_time > 1.0):
+            if self.grpc_client and (time.time() - self.last_grpc_check_time > 0.2):
                 self.last_grpc_check_time = time.time()
                 is_active, _ = self.grpc_client.get_command_state()
                 if not is_active and self.grpc_client.connected and not self.last_ros_command_active:
@@ -397,7 +565,7 @@ class ProcessingThread(threading.Thread):
             return True
             
         # 2. 检查gRPC信号 (保持原有逻辑不变)
-        if self.grpc_client and (time.time() - self.last_grpc_check_time > 1.0):
+        if self.grpc_client and (time.time() - self.last_grpc_check_time > 0.2):
             self.last_grpc_check_time = time.time()
             is_active, _ = self.grpc_client.get_command_state()
             if is_active:
@@ -418,8 +586,8 @@ class ProcessingThread(threading.Thread):
         return False
 
     def transition_to_capturing(self, frame):
-        initial_bbox = find_center_person(frame, self.yolo_model)
-        if initial_bbox is None:
+        initial_detection = find_center_person(frame, self.yolo_model)
+        if initial_detection is None:
             print("启动失败：画面中央未检测到目标。")
             return
         self.state = 'CAPTURING'
@@ -427,7 +595,7 @@ class ProcessingThread(threading.Thread):
         self.capture_start_time = time.time()
         self.last_capture_time = time.time() - 1.9
         self.status_message = "collecting... (0/5)"
-        print(f"目标锁定：{initial_bbox}。开始特征捕获...")
+        print(f"目标锁定：{initial_detection['box']}。开始特征捕获...")
 
     def process_capturing(self, frame):
         time_elapsed = time.time() - self.capture_start_time
@@ -443,9 +611,9 @@ class ProcessingThread(threading.Thread):
                 self.transition_to_idle()
             return
         if len(self.captured_features) < 5 and (time.time() - self.last_capture_time) > 0.6:
-            bbox = find_center_person(frame, self.yolo_model)
-            if bbox:
-                (xmin, ymin, xmax, ymax) = bbox
+            detection = find_center_person(frame, self.yolo_model)
+            if detection:
+                (xmin, ymin, xmax, ymax) = detection['box']
                 crop_img = frame[ymin:ymax, xmin:xmax]
                 if crop_img.size > 0:
                     crop_img_pil = Image.fromarray(cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB))
@@ -462,39 +630,113 @@ class ProcessingThread(threading.Thread):
             self.transition_to_idle()
             return
         self.status_message = "tracking..."
-        person_boxes = detect_all_persons(frame, self.yolo_model, self.args.conf_thres)
+        person_detections = detect_all_poses(frame, self.yolo_model, self.args.conf_thres)
         best_match_info = None
-        if person_boxes:
-            gallery_locs, gallery_feats = self.extract_gallery_features(frame, person_boxes)
+        current_time = time.time()
+        
+        if person_detections:
+            gallery_locs, gallery_feats = self.extract_gallery_features(frame, person_detections)
             if gallery_feats is not None:
                 distmat = self.calculate_distance_matrix(gallery_feats)
                 best_g_idx = np.argmin(distmat[0])
                 min_dist = distmat[0, best_g_idx]
                 if min_dist < self.args.dist_thres:
-                    best_match_info = {'bbox': gallery_locs[best_g_idx], 'dist': min_dist}
+                    best_detection = person_detections[best_g_idx]
+                    best_match_info = {'detection': best_detection, 'dist': min_dist}
         
         # 更新状态用于可视化和发送
         if best_match_info:
-            self.last_tracked_bbox = best_match_info['bbox']
+            best_detection = best_match_info['detection']
+            self.last_tracked_bbox = best_detection['box']
+            self.last_tracked_kpts = best_detection['keypoints']
+            self.last_tracked_kpts_conf = best_detection['keypoints_conf']
             self.last_match_dist = best_match_info['dist']
-            center = ((self.last_tracked_bbox[0] + self.last_tracked_bbox[2]) / 2, (self.last_tracked_bbox[1] + self.last_tracked_bbox[3]) / 2)
-            size = (self.last_tracked_bbox[2] - self.last_tracked_bbox[0], self.last_tracked_bbox[3] - self.last_tracked_bbox[1])
+            
+            # 使用关键点计算人体中心
+            body_center = calculate_body_center_from_keypoints(
+                best_detection['keypoints'], 
+                best_detection['keypoints_conf'], 
+                best_detection['box']
+            )
+            
+            size = (self.last_tracked_bbox[2] - self.last_tracked_bbox[0], 
+                   self.last_tracked_bbox[3] - self.last_tracked_bbox[1])
+            
             if self.current_depth_frame is not None:
-                coords = calculate_3d_coordinates(self.current_depth_frame, center, size)
-                self.last_coords = coords if coords != (0,0,0) else None
+                coords = calculate_3d_coordinates(self.current_depth_frame, body_center, size)
+                if coords != (0,0,0):
+                    self.last_coords = coords
+                    
+                    # 使用卡尔曼滤波器处理坐标
+                    measurement = np.array([coords[0], coords[1], coords[2]])
+                    
+                    if not self.ekf.is_initialized():
+                        # 初始化卡尔曼滤波器
+                        self.ekf.initialize(measurement, current_time)
+                        self.last_filtered_coords = coords
+                        self.last_predicted_coords = coords
+                        print(f"🎯 卡尔曼滤波器已初始化: [{coords[0]:.2f}, {coords[1]:.2f}, {coords[2]:.2f}]")
+                    else:
+                        # 预测和更新
+                        self.ekf.predict(current_time)
+                        filtered_state = self.ekf.update(measurement)
+                        self.last_filtered_coords = self.ekf.get_current_position()
+                        self.last_predicted_coords = self.ekf.predict_future_position(0.5)  # 预测0.5秒后的位置
+
+                        # 打印调试信息
+                        velocity = self.ekf.get_current_velocity()
+                        print(f"📍 原始: [{coords[0]:.2f}, {coords[1]:.2f}, {coords[2]:.2f}] | "
+                              f"滤波: [{self.last_filtered_coords[0]:.2f}, {self.last_filtered_coords[1]:.2f}, {self.last_filtered_coords[2]:.2f}] | "
+                              f"速度: [{velocity[0]:.2f}, {velocity[1]:.2f}, {velocity[2]:.2f}]")
+                else:
+                    self.last_coords = None
+                    # 处理目标丢失情况
+                    if self.ekf.is_initialized():
+                        predicted_pos = self.ekf.handle_lost_target(current_time)
+                        if predicted_pos is not None:
+                            self.last_filtered_coords = predicted_pos
+                            self.last_predicted_coords = self.ekf.predict_future_position(0.5)
+                            print(f"🔍 目标丢失，使用预测位置: [{predicted_pos[0]:.2f}, {predicted_pos[1]:.2f}, {predicted_pos[2]:.2f}]")
+                        else:
+                            self.last_filtered_coords = None
+                            self.last_predicted_coords = None
             else:
                 self.last_coords = None
+                self.last_filtered_coords = None
+                self.last_predicted_coords = None
         else:
             self.last_tracked_bbox = None
+            self.last_tracked_kpts = None
+            self.last_tracked_kpts_conf = None
             self.last_coords = None
+            
+            # 处理目标丢失情况
+            if self.ekf.is_initialized():
+                predicted_pos = self.ekf.handle_lost_target(current_time)
+                if predicted_pos is not None:
+                    self.last_filtered_coords = predicted_pos
+                    self.last_predicted_coords = self.ekf.predict_future_position(0.5)
+                    print(f"🔍 目标丢失，使用预测位置: [{predicted_pos[0]:.2f}, {predicted_pos[1]:.2f}, {predicted_pos[2]:.2f}]")
+                else:
+                    self.last_filtered_coords = None
+                    self.last_predicted_coords = None
+                    self.ekf.reset()  # 重置滤波器
+                    print("🔄 目标丢失时间过长，滤波器已重置")
+            else:
+                self.last_filtered_coords = None
+                self.last_predicted_coords = None
 
-        # 发送坐标 - 如果没有检测到目标，发送 (0, 0, 0)
-        coords_to_send = self.last_coords if self.last_coords else (0.0, 0.0, 0.0)
+        # 发送坐标 - 优先发送滤波后的坐标，其次是原始坐标，最后是 (0, 0, 0)
+        coords_to_send = (0.0, 0.0, 0.0)
+        if self.last_filtered_coords:
+            coords_to_send = self.last_filtered_coords
+        elif self.last_coords:
+            coords_to_send = self.last_coords
         
         if self.grpc_client:
             self.grpc_client.send_target_coordinates(coords_to_send)
             
-        # 导出坐标到文件 (用于ROS2集成)
+        # 导出坐标到文件 (用于ROS2集成) - 使用滤波后的坐标
         if self.coord_exporter:
             self.coord_exporter.export_coordinates(coords_to_send)
 
@@ -504,19 +746,82 @@ class ProcessingThread(threading.Thread):
         self.state = 'IDLE'
         self.query_feats = None
         self.captured_features = []
+        # 重置卡尔曼滤波器
+        self.ekf.reset()
+        self.last_filtered_coords = None
+        self.last_predicted_coords = None
+        print("🔄 转换到待机状态，卡尔曼滤波器已重置")
 
     def create_visualization(self, frame):
         vis_frame = frame.copy()
         
-        # 根据状态绘制不同的框
+        # 根据状态绘制不同的框和姿态
         if self.state == 'CAPTURING':
-            bbox = find_center_person(vis_frame, self.yolo_model)
-            if bbox: plot_one_box(bbox, vis_frame, label='Capturing...', color=(0, 165, 255))
-        elif self.state == 'TRACKING' and self.last_tracked_bbox:
-            label = f"Target | Dist: {self.last_match_dist:.2f}"
-            if self.last_coords:
-                label += f' | Coords: {self.last_coords[0]:.1f}, {self.last_coords[1]:.1f}, {self.last_coords[2]:.1f}m'
-            plot_one_box(self.last_tracked_bbox, vis_frame, label=label, color=(0,255,0))
+            detection = find_center_person(vis_frame, self.yolo_model)
+            if detection: 
+                draw_pose_on_person(vis_frame, detection, "Capturing...", (0, 165, 255))
+        elif self.state == 'TRACKING':
+            # 绘制所有检测到的人物（浅色）
+            all_detections = detect_all_poses(vis_frame, self.yolo_model, self.args.conf_thres)
+            for detection in all_detections:
+                # 用浅色绘制所有检测到的人
+                draw_skeleton(vis_frame, detection['keypoints'], detection['keypoints_conf'])
+                plot_one_box(detection['box'], vis_frame, label="Person", color=(128, 128, 128))
+            
+            # 绘制跟踪目标（高亮）
+            if self.last_tracked_bbox and self.last_tracked_kpts is not None:
+                label = f"Target | Dist: {self.last_match_dist:.2f}"
+                
+                # 显示原始坐标
+                if self.last_coords:
+                    label += f' | Raw: {self.last_coords[0]:.1f}, {self.last_coords[1]:.1f}, {self.last_coords[2]:.1f}m'
+                
+                # 显示滤波后的坐标
+                if self.last_filtered_coords:
+                    label += f' | Filtered: {self.last_filtered_coords[0]:.1f}, {self.last_filtered_coords[1]:.1f}, {self.last_filtered_coords[2]:.1f}m'
+                
+                # 绘制跟踪目标的边界框
+                plot_one_box(self.last_tracked_bbox, vis_frame, label=label, color=(0,255,0))
+                
+                # 创建伪检测对象来绘制骨架
+                tracked_detection = {
+                    'box': self.last_tracked_bbox,
+                    'keypoints': self.last_tracked_kpts,
+                    'keypoints_conf': self.last_tracked_kpts_conf
+                }
+                
+                # 绘制跟踪目标的骨架和关键点（高亮显示）
+                draw_skeleton(vis_frame, tracked_detection['keypoints'], tracked_detection['keypoints_conf'])
+                draw_keypoints(vis_frame, tracked_detection['keypoints'], tracked_detection['keypoints_conf'])
+                
+                # 绘制人体中心点（特殊标记）
+                body_center = calculate_body_center_from_keypoints(
+                    tracked_detection['keypoints'], tracked_detection['keypoints_conf'], tracked_detection['box']
+                )
+                center_x, center_y = int(body_center[0]), int(body_center[1])
+                cv2.circle(vis_frame, (center_x, center_y), 8, (0, 255, 255), -1)  # 黄色圆点
+                cv2.circle(vis_frame, (center_x, center_y), 10, (0, 0, 0), 2)     # 黑色边框
+                
+                # 绘制预测位置的投影（如果有）
+                if self.last_predicted_coords and self.current_depth_frame is not None:
+                    # 将3D预测位置投影回图像坐标
+                    fx, fy = 734.357, 734.629
+                    cx, cy = 816.469, 642.979
+                    
+                    X_world, Y_world, Z_world = self.last_predicted_coords
+                    Z_cam = X_world
+                    X_cam = -Y_world
+                    Y_cam = -Z_world
+                    
+                    if Z_cam > 0.3:  # 只有在合理距离内才绘制
+                        u_pred = int(X_cam * fx / Z_cam + cx)
+                        v_pred = int(Y_cam * fy / Z_cam + cy)
+                        
+                        # 确保坐标在图像范围内
+                        if 0 <= u_pred < vis_frame.shape[1] and 0 <= v_pred < vis_frame.shape[0]:
+                            cv2.circle(vis_frame, (u_pred, v_pred), 12, (255, 255, 0), 3)  # 青色预测圆圈
+                            cv2.putText(vis_frame, "Pred", (u_pred-20, v_pred-15), 
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         
         # 绘制固定的UI元素
         self.frame_count += 1
@@ -527,11 +832,29 @@ class ProcessingThread(threading.Thread):
         
         cv2.putText(vis_frame, f"FPS: {self.fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(vis_frame, self.status_message, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        
+        # 显示卡尔曼滤波器状态
+        if self.ekf.is_initialized():
+            uncertainty = self.ekf.get_position_uncertainty()
+            velocity = self.ekf.get_current_velocity()
+            ekf_status = f"Enhanced EKF: Init | Unc: {uncertainty:.3f} | Vel: [{velocity[0]:.2f}, {velocity[1]:.2f}, {velocity[2]:.2f}]"
+            cv2.putText(vis_frame, ekf_status, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        else:
+            cv2.putText(vis_frame, "Enhanced EKF: Not Initialized", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
+        
+        # 显示关键点信息
+        if self.state == 'TRACKING' and self.last_tracked_kpts is not None:
+            valid_kpts = sum(1 for conf in self.last_tracked_kpts_conf if conf > 0.5)
+            kpt_info = f"Keypoints: {valid_kpts}/17"
+            cv2.putText(vis_frame, kpt_info, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
         return vis_frame
 
-    def extract_gallery_features(self, frame, person_boxes):
+    def extract_gallery_features(self, frame, person_detections):
+        """从姿态检测结果中提取特征"""
         gallery_locs, gallery_img_tensors = [], []
-        for xmin, ymin, xmax, ymax in person_boxes:
+        for detection in person_detections:
+            xmin, ymin, xmax, ymax = detection['box']
             crop_img = frame[ymin:ymax, xmin:xmax]
             if crop_img.size > 0:
                 gallery_locs.append((xmin, ymin, xmax, ymax))
@@ -668,15 +991,23 @@ def main(args):
     print("程序已安全退出。")
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='ROS2 ReID Auto Tracking')
-    parser.add_argument('--model-path', type=str, default='yolo11n.pt', help='YOLOv8模型路径')
-    parser.add_argument('--dist-thres', type=float, default=1.2, help='ReID距离阈值')
+    parser = argparse.ArgumentParser(description='ROS2 ReID Auto Tracking with Pose Detection and Kalman Filter')
+    parser.add_argument('--model-path', type=str, default='models/yolo11n-pose.pt', help='YOLOv11-Pose模型路径')
+    parser.add_argument('--dist-thres', type=float, default=1.1, help='ReID距离阈值')
     parser.add_argument('--conf-thres', type=float, default=0.5, help='YOLO检测置信度阈值')
     parser.add_argument('--device', type=str, default=None, help='计算设备 (e.g., cpu, cuda:0)')
     parser.add_argument('--grpc-server', default='localhost:50051', help='gRPC服务器地址')
     parser.add_argument('--no-viz', action='store_true', help='禁用可视化界面')
     parser.add_argument('--no-grpc', action='store_true', help='禁用gRPC通信')
     parser.add_argument('--no-ros-export', action='store_true', help='禁用ROS2坐标导出')
+    
+    # 卡尔曼滤波器参数
+    parser.add_argument('--ekf-process-noise', type=float, default=0.5, help='卡尔曼滤波器过程噪声标准差')
+    parser.add_argument('--ekf-measurement-noise', type=float, default=3.0, help='卡尔曼滤波器测量噪声标准差')
+    parser.add_argument('--ekf-velocity-std', type=float, default=0.5, help='卡尔曼滤波器初始速度不确定性标准差')
+    parser.add_argument('--ekf-acceleration-std', type=float, default=0.3, help='卡尔曼滤波器初始加速度不确定性标准差')
+    parser.add_argument('--ekf-angular-velocity-std', type=float, default=0.2, help='卡尔曼滤波器初始角速度不确定性标准差')
+
     return parser.parse_args()
 
 if __name__ == '__main__':
@@ -684,4 +1015,13 @@ if __name__ == '__main__':
     if args.device is None:
         args.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     print(f"使用的计算设备: {args.device}")
+    
+    # 显示卡尔曼滤波器配置信息
+    print(f"🎯 卡尔曼滤波器配置: Enhanced EKF (匀加速运动模型)")
+    print(f"   过程噪声: {args.ekf_process_noise}")
+    print(f"   测量噪声: {args.ekf_measurement_noise}")
+    print(f"   速度不确定性: {args.ekf_velocity_std}")
+    print(f"   加速度不确定性: {args.ekf_acceleration_std}")
+    print(f"   角速度不确定性: {args.ekf_angular_velocity_std}")
+    
     main(args)
