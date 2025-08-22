@@ -322,7 +322,7 @@ def calculate_3d_coordinates(depth_map, center_point, size=None):
 
 def detect_all_poses(frame, model, conf_thres=0.5):
     """检测所有人的姿态，返回包含边界框和关键点的检测结果"""
-    results = model.predict(source=frame, show=False, classes=[0], conf=conf_thres, verbose=False)
+    results = model.predict(source=frame, imgsz=320, show=False, classes=[0], conf=conf_thres, verbose=False)
     detections = []
     if len(results[0].boxes) > 0 and results[0].keypoints is not None:
         for i in range(len(results[0].boxes)):

@@ -6,8 +6,8 @@ sleep 5
 
 cd ~/track_odin
 
-gnome-terminal -- bash -i -c "conda deactivate && python3 track_odin/simple_pose_publisher.py; exec bash"
-gnome-terminal -- bash -i -c "conda deactivate && python3 track_odin/vision_control_subscriber.py; exec bash"
+gnome-terminal -- bash -i -c "conda deactivate && python3 track_torch_ros2/simple_pose_publisher.py; exec bash"
+gnome-terminal -- bash -i -c "conda deactivate && python3 track_torch_ros2/vision_control_subscriber.py; exec bash"
 
 
 source ~/anaconda3/etc/profile.d/conda.sh
@@ -15,4 +15,3 @@ source ~/anaconda3/etc/profile.d/conda.sh
 gnome-terminal -- bash -i -c "conda activate odin && python grpc_server.py; exec bash"
 gnome-terminal -- bash -i -c "conda activate odin && python grpc_client_test.py; exec bash"
 gnome-terminal -- bash -i -c "conda activate odin && python track_odin.py ; exec bash"
-
