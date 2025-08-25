@@ -96,7 +96,7 @@ KEYPOINT_COLORS = [
     (255, 0, 170)   # 16: 右踝 - 玫红色
 ]
 
-def draw_keypoints(image, keypoints, keypoints_conf, conf_threshold=0.5):
+def draw_keypoints(image, keypoints, keypoints_conf, conf_threshold=0.1):
     """绘制关键点"""
     for i, (kpt, conf) in enumerate(zip(keypoints, keypoints_conf)):
         if conf > conf_threshold:
@@ -105,7 +105,7 @@ def draw_keypoints(image, keypoints, keypoints_conf, conf_threshold=0.5):
             cv2.circle(image, (x, y), 4, color, -1)
             cv2.circle(image, (x, y), 6, (0, 0, 0), 2)  # 黑色边框
 
-def draw_skeleton(image, keypoints, keypoints_conf, conf_threshold=0.5):
+def draw_skeleton(image, keypoints, keypoints_conf, conf_threshold=0.1):
     """绘制骨架连接"""
     for connection in SKELETON_CONNECTIONS:
         pt1_idx, pt2_idx = connection
@@ -350,7 +350,7 @@ def calculate_body_center_from_keypoints(keypoints, keypoints_conf, bbox):
     
     # 收集有效的关键点
     valid_points = []
-    conf_threshold = 0.5
+    conf_threshold = 0.01
     
     if keypoints_conf[left_shoulder] > conf_threshold:
         valid_points.append(keypoints[left_shoulder])

@@ -511,27 +511,48 @@ class CameraManager:
         if self.device: self.device.close()
 
 class FrameCaptureThread(threading.Thread):
-    def __init__(self, device, frame_queue):
+    def __init__(self, device, frame_queue, stop_event=None):
         super().__init__()
         self.device = device
         self.frame_queue = frame_queue
         self.running = True
+        self.stop_event = stop_event  # 全局停止事件
+        self.error_occurred = False  # 标记是否发生错误
         self.q_rgb = device.getOutputQueue(name="rgb", maxSize=4, blocking=False)
         self.q_depth = device.getOutputQueue(name="depth", maxSize=4, blocking=False)
+    
     def run(self):
-        while self.running:
-            try:
-                in_rgb = self.q_rgb.get()
-                in_depth = self.q_depth.get()
-                if self.frame_queue.full():
-                    self.frame_queue.get_nowait()
-                self.frame_queue.put((in_rgb.getCvFrame(), in_depth.getFrame()))
-            except Exception as e:
-                if self.running: print(f"相机线程错误: {e}")
-                self.running = False
-        print("相机线程已停止。")
+        try:
+            while self.running:
+                try:
+                    in_rgb = self.q_rgb.get()
+                    in_depth = self.q_depth.get()
+                    if self.frame_queue.full():
+                        self.frame_queue.get_nowait()
+                    self.frame_queue.put((in_rgb.getCvFrame(), in_depth.getFrame()))
+                except Exception as e:
+                    if self.running: 
+                        print(f"❌ 相机数据获取错误: {e}")
+                        self.error_occurred = True
+                        # 触发全局停止事件
+                        if self.stop_event:
+                            self.stop_event.set()
+                        break
+        except Exception as e:
+            print(f"❌ 相机线程发生严重错误: {e}")
+            self.error_occurred = True
+            # 触发全局停止事件
+            if self.stop_event:
+                self.stop_event.set()
+        finally:
+            self.running = False
+            print("相机线程已停止。")
+    
     def stop(self):
         self.running = False
+    
+    def has_error(self):
+        return self.error_occurred
 
 class ProcessingThread(threading.Thread):
     def __init__(self, frame_queue, result_queue, stop_event, start_event, grpc_client, args, yolo_model, reid_model):
@@ -1123,7 +1144,7 @@ def main(args):
     
     grpc_client = TrackingGRPCClient(args.grpc_server) if not args.no_grpc else None
 
-    capture_thread = FrameCaptureThread(camera_manager.get_device(), frame_queue)
+    capture_thread = FrameCaptureThread(camera_manager.get_device(), frame_queue, stop_event)
     processing_thread = ProcessingThread(frame_queue, result_queue, stop_event, start_event, grpc_client, args, yolo_model, reid_model)
 
     # 创建RTSP流线程
@@ -1147,16 +1168,27 @@ def main(args):
         cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
         while not stop_event.is_set():
             try:
+                # 检查相机线程状态
+                if not capture_thread.is_alive():
+                    if capture_thread.has_error():
+                        print("❌ 相机线程意外终止，程序将退出...")
+                    else:
+                        print("ℹ️ 相机线程正常结束...")
+                    stop_event.set()
+                    break
+                
                 display_frame = result_queue.get(timeout=2)
                 cv2.imshow(window_name, display_frame)
             except queue.Empty:
                 if not processing_thread.is_alive():
                     print("❌ 处理线程已意外终止。")
+                    stop_event.set()
                     break
                 continue
 
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'): stop_event.set()
+            if key == ord('q'): 
+                stop_event.set()
             elif key == ord('r'):
                 print("键盘 'R' 已按下，发送开始信号...")
                 start_event.set()
@@ -1164,25 +1196,53 @@ def main(args):
         cv2.destroyAllWindows()
     else:
         try:
-            while not stop_event.is_set(): time.sleep(1)
+            while not stop_event.is_set(): 
+                # 在无界面模式下也要检查相机线程状态
+                if not capture_thread.is_alive():
+                    if capture_thread.has_error():
+                        print("❌ 相机线程意外终止，程序将退出...")
+                    else:
+                        print("ℹ️ 相机线程正常结束...")
+                    stop_event.set()
+                    break
+                time.sleep(1)
         except KeyboardInterrupt:
             stop_event.set()
 
     print("正在停止所有线程...")
     stop_event.set()
-    capture_thread.stop()
-    capture_thread.join(timeout=2)
-    processing_thread.join(timeout=5)
-    if rtsp_thread:
+    
+    # 优雅地停止各个线程
+    if capture_thread.is_alive():
+        capture_thread.stop()
+        capture_thread.join(timeout=2)
+        if capture_thread.is_alive():
+            print("⚠️ 相机线程强制终止超时")
+    
+    if processing_thread.is_alive():
+        processing_thread.join(timeout=5)
+        if processing_thread.is_alive():
+            print("⚠️ 处理线程强制终止超时")
+    
+    if rtsp_thread and rtsp_thread.is_alive():
         rtsp_thread.stop()
         rtsp_thread.join(timeout=2)
+        if rtsp_thread.is_alive():
+            print("⚠️ RTSP线程强制终止超时")
+    
     camera_manager.close()
-    print("程序已安全退出。")
+    
+    # 检查是否因为相机错误而退出
+    if capture_thread.has_error():
+        print("程序因相机错误而退出。")
+        sys.exit(1)  # 使用非零退出码表示错误
+    else:
+        print("程序已安全退出。")
 
 def parse_args():
     parser = argparse.ArgumentParser(description='OAK ReID Auto Tracking with gRPC and RTSP')
     parser.add_argument('--model-path', type=str, default='models/yolo11n-pose.pt', help='YOLOv11-Pose模型路径')
-    parser.add_argument('--dist-thres', type=float, default=1.0, help='ReID距离阈值')
+    parser.add_argument('--dist-thres', type=float, default=1.1, help='ReID距离阈值')
     parser.add_argument('--conf-thres', type=float, default=0.5, help='YOLO检测置信度阈值')
     parser.add_argument('--device', type=str, default=None, help='计算设备 (e.g., cpu, cuda:0)')
     parser.add_argument('--grpc-server', default='localhost:50051', help='gRPC服务器地址')
